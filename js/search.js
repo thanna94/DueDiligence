@@ -1,8 +1,8 @@
 /**
  * Search Module
  *
- * Handles address search, parcel ID search, and geocoding.
- * Uses ESRI geocoder for address lookup and ParcelService for data.
+ * Handles address search, parcel ID search, and owner name search.
+ * Uses ESRI geocoder + Arkansas CAMP parcel service.
  */
 
 const SearchModule = (() => {
@@ -14,9 +14,6 @@ const SearchModule = (() => {
   let activeIndex = -1;
   let currentResults = [];
 
-  /**
-   * Initialize the search module
-   */
   function init(options = {}) {
     searchInput = document.getElementById('address-search');
     clearBtn = document.getElementById('search-clear');
@@ -33,15 +30,11 @@ const SearchModule = (() => {
 
     clearBtn.addEventListener('click', clearSearch);
 
-    // Close dropdown when clicking outside
     document.addEventListener('click', (e) => {
       if (!e.target.closest('.search-container')) hideDropdown();
     });
   }
 
-  /**
-   * Handle input changes (debounced)
-   */
   function onInput(e) {
     const query = e.target.value.trim();
     clearBtn.classList.toggle('hidden', query.length === 0);
@@ -54,12 +47,9 @@ const SearchModule = (() => {
       return;
     }
 
-    debounceTimer = setTimeout(() => performSearch(query), 350);
+    debounceTimer = setTimeout(() => performSearch(query), 400);
   }
 
-  /**
-   * Handle keyboard navigation
-   */
   function onKeyDown(e) {
     const items = dropdown.querySelectorAll('.search-result-item');
 
@@ -89,9 +79,6 @@ const SearchModule = (() => {
     }
   }
 
-  /**
-   * Update the visually active item in dropdown
-   */
   function updateActiveItem(items) {
     items.forEach((item, i) => {
       item.classList.toggle('active', i === activeIndex);
@@ -99,64 +86,81 @@ const SearchModule = (() => {
   }
 
   /**
-   * Perform search using multiple strategies
+   * Perform search: tries parcel search (address, ID, or owner) AND geocoding in parallel
    */
   async function performSearch(query) {
     const results = [];
 
-    // Get active county filter
+    // Determine county filter
     const countyFilter = document.getElementById('county-filter');
     const countyId = countyFilter ? countyFilter.value : 'all';
     const county = countyId !== 'all' ? CountyRegistry.get(countyId) : null;
 
-    // Determine if query looks like a parcel ID
-    const isParcelId = /^\d{2,3}-\d/.test(query) || /^\d{8,}$/.test(query);
+    // Detect query type
+    const isParcelId = /^\d{2,3}-/.test(query) || /^\d{7,}$/.test(query);
+    const isOwnerSearch = /^[a-zA-Z]{3,}\s*,/.test(query); // "Last, First" pattern
+
+    // Show loading state
+    dropdown.innerHTML = '<div class="search-result-item"><span class="result-text"><span class="result-primary">Searching...</span></span></div>';
+    showDropdown();
 
     try {
-      // Run geocoding and parcel searches in parallel
       const promises = [];
 
-      // ESRI geocoding for address
+      // Always geocode
       promises.push(geocodeAddress(query));
 
-      // Parcel service searches
+      // Parcel service search
       if (isParcelId) {
         promises.push(ParcelService.searchByParcelId(query, county));
+      } else if (isOwnerSearch) {
+        promises.push(ParcelService.searchByOwner(query, county));
       } else {
         promises.push(ParcelService.searchByAddress(query, county));
       }
 
       const [geocodeResults, parcelResults] = await Promise.all(promises);
 
-      // Add geocoded addresses
-      if (geocodeResults) {
-        geocodeResults.forEach(r => {
-          results.push({
-            type: 'geocode',
-            label: r.text || r.address,
-            secondary: r.secondaryText || '',
-            lat: r.latlng ? r.latlng.lat : r.location?.y,
-            lng: r.latlng ? r.latlng.lng : r.location?.x,
-            data: r,
-          });
-        });
-      }
-
-      // Add parcel results
-      if (parcelResults) {
+      // Add parcel results first (more specific)
+      if (parcelResults && parcelResults.length > 0) {
         parcelResults.forEach(p => {
           results.push({
             type: 'parcel',
-            label: p.address || p.parcelId || 'Unknown',
-            secondary: [p.owner, p.county ? `${p.county} County` : ''].filter(Boolean).join(' - '),
+            label: p.address || p.parcelId || 'Unknown Parcel',
+            secondary: [
+              p.owner,
+              p.county ? `${p.county} County` : '',
+              p.acres ? `${parseFloat(p.acres).toFixed(2)} ac` : '',
+            ].filter(Boolean).join(' · '),
             lat: p.centroid?.lat,
             lng: p.centroid?.lng,
             data: p,
           });
         });
       }
+
+      // Add geocoded addresses
+      if (geocodeResults && geocodeResults.length > 0) {
+        geocodeResults.forEach(r => {
+          // Skip if we already have a parcel result with a very similar address
+          const isDuplicate = results.some(existing =>
+            existing.label && r.text &&
+            existing.label.toUpperCase().includes(r.text.split(',')[0].toUpperCase())
+          );
+          if (!isDuplicate) {
+            results.push({
+              type: 'geocode',
+              label: r.text || r.address,
+              secondary: 'Geocoded address — click to search for parcel',
+              lat: r.latlng?.lat,
+              lng: r.latlng?.lng,
+              data: r,
+            });
+          }
+        });
+      }
     } catch (err) {
-      console.error('Search error:', err);
+      console.error('[Search] Error:', err);
     }
 
     currentResults = results;
@@ -165,7 +169,7 @@ const SearchModule = (() => {
   }
 
   /**
-   * Geocode an address using ESRI geocoder
+   * Geocode address using ESRI World Geocoder (free, no key needed)
    */
   async function geocodeAddress(query) {
     try {
@@ -173,8 +177,10 @@ const SearchModule = (() => {
         text: query,
         f: 'json',
         maxLocations: 5,
-        location: '-94.25,35.85', // NWA center for bias
-        distance: 100000, // 100km radius bias
+        // Bias results toward NW Arkansas
+        location: '-94.25,35.85',
+        distance: 150000, // 150km bias radius
+        countryCode: 'US',
         outFields: '*',
       });
       const url = `https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?${params}`;
@@ -183,28 +189,29 @@ const SearchModule = (() => {
 
       if (data.candidates) {
         return data.candidates
-          .filter(c => c.score > 70)
+          .filter(c => c.score > 60)
           .slice(0, 5)
           .map(c => ({
             text: c.address,
-            secondaryText: `Score: ${c.score}`,
-            location: c.location,
             latlng: { lat: c.location.y, lng: c.location.x },
-            attributes: c.attributes,
+            score: c.score,
           }));
       }
     } catch (e) {
-      console.warn('Geocoding failed:', e.message);
+      console.warn('[Search] Geocoding failed:', e.message);
     }
     return [];
   }
 
-  /**
-   * Render search results in dropdown
-   */
   function renderResults(results) {
     if (results.length === 0) {
-      dropdown.innerHTML = '<div class="search-result-item"><span class="result-text"><span class="result-primary">No results found</span></span></div>';
+      dropdown.innerHTML = `
+        <div class="search-result-item">
+          <span class="result-text">
+            <span class="result-primary">No results found</span>
+            <div class="result-secondary">Try a different address, parcel ID, or owner name (Last, First)</div>
+          </span>
+        </div>`;
       showDropdown();
       return;
     }
@@ -212,9 +219,9 @@ const SearchModule = (() => {
     dropdown.innerHTML = results.map((r, i) => `
       <div class="search-result-item" data-index="${i}">
         <span class="result-icon">
-          ${r.type === 'parcel' ?
-            '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M3 9h18"/></svg>' :
-            '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>'
+          ${r.type === 'parcel'
+            ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M3 9h18"/></svg>'
+            : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>'
           }
         </span>
         <span class="result-text">
@@ -224,7 +231,6 @@ const SearchModule = (() => {
       </div>
     `).join('');
 
-    // Attach click handlers
     dropdown.querySelectorAll('.search-result-item').forEach(item => {
       item.addEventListener('click', () => {
         const idx = parseInt(item.dataset.index);
@@ -235,22 +241,13 @@ const SearchModule = (() => {
     showDropdown();
   }
 
-  /**
-   * Handle result selection
-   */
   function selectResult(result) {
     searchInput.value = result.label;
     hideDropdown();
     clearBtn.classList.remove('hidden');
-
-    if (onResultSelect) {
-      onResultSelect(result);
-    }
+    if (onResultSelect) onResultSelect(result);
   }
 
-  /**
-   * Clear search input
-   */
   function clearSearch() {
     searchInput.value = '';
     clearBtn.classList.add('hidden');
@@ -259,14 +256,8 @@ const SearchModule = (() => {
     searchInput.focus();
   }
 
-  function showDropdown() {
-    dropdown.classList.remove('hidden');
-  }
-
-  function hideDropdown() {
-    dropdown.classList.add('hidden');
-    activeIndex = -1;
-  }
+  function showDropdown() { dropdown.classList.remove('hidden'); }
+  function hideDropdown() { dropdown.classList.add('hidden'); activeIndex = -1; }
 
   function escapeHtml(str) {
     const div = document.createElement('div');
@@ -274,9 +265,5 @@ const SearchModule = (() => {
     return div.innerHTML;
   }
 
-  return {
-    init,
-    clearSearch,
-    geocodeAddress,
-  };
+  return { init, clearSearch, geocodeAddress };
 })();

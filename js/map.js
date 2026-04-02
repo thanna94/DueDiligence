@@ -1,19 +1,19 @@
 /**
  * Map Module
  *
- * Handles Leaflet map initialization, basemap switching, parcel layer display,
- * click-to-select parcels, and map overlay layers.
+ * Handles Leaflet map, parcel polygon rendering, click-to-query,
+ * and basemap switching.
  */
 
 const MapModule = (() => {
   let map = null;
   let parcelLayer = null;
   let selectedParcelLayer = null;
-  let hoverParcelLayer = null;
   let basemapLayers = {};
   let activeBasemap = 'streets';
   let parcelLoadTimer = null;
   let onParcelSelect = null;
+  let isLoading = false;
   let layerStates = {
     parcels: true,
     zoning: false,
@@ -22,13 +22,13 @@ const MapModule = (() => {
     masterPlan: false,
   };
 
-  // ArcGIS-backed overlay layers
-  let overlayLayers = {};
+  // Track what parcels we've loaded so we don't re-fetch
+  let lastLoadedBounds = null;
 
   /**
    * Initialize the map
    */
-  function init(elementId, options = {}) {
+  function init(elementId) {
     map = L.map(elementId, {
       center: NWA_REGION.center,
       zoom: NWA_REGION.zoom,
@@ -56,106 +56,159 @@ const MapModule = (() => {
 
     basemapLayers.streets.addTo(map);
 
+    // Add the Arkansas statewide parcel MapServer as a dynamic tile overlay
+    // This renders parcel boundaries server-side (fast, works at all zoom levels)
+    try {
+      const parcelTileLayer = L.esri.dynamicMapLayer({
+        url: ARKANSAS_GIS.parcelMapService,
+        layers: [6], // PARCEL_POLYGON_CAMP
+        opacity: 0.5,
+        minZoom: 14,
+        maxZoom: 20,
+        f: 'image',
+      });
+      parcelTileLayer.addTo(map);
+    } catch (e) {
+      console.warn('[Map] esri.dynamicMapLayer not available, using click-only mode');
+    }
+
     // County boundary outlines
     addCountyBoundaries();
 
-    // Parcel layer (GeoJSON features added dynamically)
+    // Layer for individually fetched parcel polygons (click results)
     parcelLayer = L.geoJSON(null, {
       style: {
         color: '#2563eb',
-        weight: 1,
-        opacity: 0.6,
+        weight: 1.5,
+        opacity: 0.7,
         fillColor: '#2563eb',
-        fillOpacity: 0.05,
+        fillOpacity: 0.08,
       },
       onEachFeature: (feature, layer) => {
-        layer.on('click', () => selectParcel(feature, layer));
+        // Tooltip on hover
+        const props = feature.properties || {};
+        const tip = [
+          props.adrlabel || props.parcelid,
+          props.ownername,
+          props.gis_acres ? `${parseFloat(props.gis_acres).toFixed(2)} ac` : null,
+        ].filter(Boolean).join('<br>');
+        if (tip) layer.bindTooltip(tip, { sticky: true });
+
+        layer.on('click', () => handleFeatureClick(feature));
         layer.on('mouseover', () => {
-          if (layer !== selectedParcelLayer) {
-            layer.setStyle({ fillOpacity: 0.15, weight: 2 });
-          }
+          layer.setStyle({ fillOpacity: 0.2, weight: 2.5 });
         });
         layer.on('mouseout', () => {
-          if (layer !== selectedParcelLayer) {
-            layer.setStyle({ fillOpacity: 0.05, weight: 1 });
-          }
+          layer.setStyle({ fillOpacity: 0.08, weight: 1.5 });
         });
       }
     }).addTo(map);
 
-    // Selected parcel highlight layer
+    // Selected parcel highlight
     selectedParcelLayer = L.geoJSON(null, {
       style: {
-        color: '#2563eb',
-        weight: 3,
+        color: '#f59e0b',
+        weight: 4,
         opacity: 1,
-        fillColor: '#2563eb',
-        fillOpacity: 0.2,
-        dashArray: null,
+        fillColor: '#f59e0b',
+        fillOpacity: 0.25,
       }
     }).addTo(map);
 
-    // Map click handler for areas without parcels loaded
+    // Map click — query for parcel at click point
     map.on('click', onMapClick);
 
-    // Load parcels when map moves (debounced)
+    // Load parcel polygons when zoomed in enough
     map.on('moveend', () => {
-      if (layerStates.parcels && map.getZoom() >= 15) {
+      if (layerStates.parcels && map.getZoom() >= 16) {
         clearTimeout(parcelLoadTimer);
-        parcelLoadTimer = setTimeout(loadVisibleParcels, 300);
-      } else if (map.getZoom() < 15) {
+        parcelLoadTimer = setTimeout(loadVisibleParcels, 400);
+      } else if (map.getZoom() < 16) {
         parcelLayer.clearLayers();
+        lastLoadedBounds = null;
       }
     });
 
-    // Position zoom control
     map.zoomControl.setPosition('topleft');
 
     return map;
   }
 
   /**
-   * Add county boundary outlines to the map
+   * County boundary outlines
    */
   function addCountyBoundaries() {
     CountyRegistry.getAll().forEach(county => {
       if (county.bounds) {
-        L.rectangle(county.bounds, {
+        const rect = L.rectangle(county.bounds, {
           color: county.color,
           weight: 2,
-          fillOpacity: 0,
+          fillOpacity: 0.02,
+          fillColor: county.color,
           dashArray: '8, 4',
           interactive: false,
-        }).addTo(map).bindTooltip(county.shortName, {
+        }).addTo(map);
+        rect.bindTooltip(county.shortName + ' County', {
           permanent: false,
           direction: 'center',
-          className: 'county-label'
+          className: 'county-label',
         });
       }
     });
   }
 
   /**
-   * Handle map click - query for parcel at click point
+   * Handle map click
    */
   async function onMapClick(e) {
-    if (map.getZoom() < 13) return; // Too zoomed out for parcel queries
+    if (map.getZoom() < 12) return; // Too zoomed out
 
     const { lat, lng } = e.latlng;
     showLoading(true);
 
-    // Determine which county the click is in
     const county = findCountyForPoint(lat, lng);
 
     try {
       const parcel = await ParcelService.getParcelAtPoint(lat, lng, county);
-      if (parcel && onParcelSelect) {
+      if (parcel) {
         highlightParcel(parcel);
-        onParcelSelect(parcel);
+        if (onParcelSelect) onParcelSelect(parcel);
+      } else {
+        showLoading(false);
+        console.log('[Map] No parcel found at', lat, lng);
       }
     } catch (err) {
-      console.error('Parcel query error:', err);
-    } finally {
+      console.error('[Map] Parcel query error:', err);
+      showLoading(false);
+    }
+  }
+
+  /**
+   * Handle click on a loaded GeoJSON feature
+   */
+  async function handleFeatureClick(feature) {
+    const props = feature.properties || {};
+    // We have basic display fields, but need full detail
+    // Use centroid of the feature to query full attributes
+    let lat, lng;
+    if (feature.geometry.type === 'Polygon') {
+      const ring = feature.geometry.coordinates[0];
+      let cx = 0, cy = 0;
+      ring.forEach(([x, y]) => { cx += x; cy += y; });
+      lng = cx / ring.length;
+      lat = cy / ring.length;
+    } else if (feature.geometry.type === 'Point') {
+      [lng, lat] = feature.geometry.coordinates;
+    }
+
+    if (lat && lng) {
+      showLoading(true);
+      const county = findCountyForPoint(lat, lng);
+      const parcel = await ParcelService.getParcelAtPoint(lat, lng, county);
+      if (parcel) {
+        highlightParcel(parcel);
+        if (onParcelSelect) onParcelSelect(parcel);
+      }
       showLoading(false);
     }
   }
@@ -175,27 +228,11 @@ const MapModule = (() => {
   }
 
   /**
-   * Select a parcel feature
-   */
-  function selectParcel(feature, layer) {
-    const county = findCountyForPoint(
-      feature.geometry.coordinates ? feature.geometry.coordinates[1] : 0,
-      feature.geometry.coordinates ? feature.geometry.coordinates[0] : 0
-    );
-    const parcel = ParcelService.normalizeParcelData(
-      { attributes: feature.properties, geometry: arcgisGeomFromGeoJSON(feature.geometry) },
-      county
-    );
-
-    highlightParcel(parcel);
-    if (onParcelSelect) onParcelSelect(parcel);
-  }
-
-  /**
    * Highlight a parcel on the map
    */
   function highlightParcel(parcel) {
     selectedParcelLayer.clearLayers();
+    showLoading(false);
 
     if (parcel.geometry) {
       const geoJson = geojsonFromArcgis(parcel.geometry);
@@ -203,87 +240,91 @@ const MapModule = (() => {
         selectedParcelLayer.addData({
           type: 'Feature',
           geometry: geoJson,
-          properties: {}
+          properties: {},
         });
+        // Fit map to the parcel bounds
+        const bounds = selectedParcelLayer.getBounds();
+        if (bounds.isValid()) {
+          map.flyToBounds(bounds.pad(0.5), { duration: 0.8, maxZoom: 18 });
+        }
       }
-    }
-
-    if (parcel.centroid) {
+    } else if (parcel.centroid) {
+      // No polygon geometry (centroid only) — just fly to point
       map.flyTo([parcel.centroid.lat, parcel.centroid.lng], Math.max(map.getZoom(), 17), {
-        duration: 0.8
+        duration: 0.8,
       });
+      // Add a marker
+      L.circleMarker([parcel.centroid.lat, parcel.centroid.lng], {
+        radius: 8,
+        color: '#f59e0b',
+        weight: 3,
+        fillColor: '#f59e0b',
+        fillOpacity: 0.3,
+      }).addTo(selectedParcelLayer);
     }
   }
 
   /**
-   * Convert ArcGIS geometry to GeoJSON geometry
+   * Convert ArcGIS geometry to GeoJSON
    */
   function geojsonFromArcgis(geom) {
     if (!geom) return null;
     if (geom.rings) {
-      return {
-        type: 'Polygon',
-        coordinates: geom.rings
-      };
+      return { type: 'Polygon', coordinates: geom.rings };
     }
     if (geom.x !== undefined) {
-      return {
-        type: 'Point',
-        coordinates: [geom.x, geom.y]
-      };
+      return { type: 'Point', coordinates: [geom.x, geom.y] };
     }
     return null;
   }
 
   /**
-   * Convert GeoJSON geometry back to ArcGIS geometry (basic)
-   */
-  function arcgisGeomFromGeoJSON(geom) {
-    if (!geom) return null;
-    if (geom.type === 'Polygon') {
-      return { rings: geom.coordinates, spatialReference: { wkid: 4326 } };
-    }
-    if (geom.type === 'Point') {
-      return { x: geom.coordinates[0], y: geom.coordinates[1], spatialReference: { wkid: 4326 } };
-    }
-    return null;
-  }
-
-  /**
-   * Load parcels visible in the current map extent
+   * Load parcel polygons visible in current extent
    */
   async function loadVisibleParcels() {
-    if (map.getZoom() < 15) return;
+    if (map.getZoom() < 16 || isLoading) return;
 
-    showLoading(true);
     const bounds = map.getBounds();
 
+    // Don't reload if we're still within the last loaded area
+    if (lastLoadedBounds && lastLoadedBounds.contains(bounds)) return;
+
+    isLoading = true;
+    showLoading(true);
+
     try {
-      const data = await ParcelService.getParcelsInExtent(bounds);
+      // Get the active county filter
+      const countyFilter = document.getElementById('county-filter');
+      const countyId = countyFilter ? countyFilter.value : 'all';
+      const county = countyId !== 'all' ? CountyRegistry.get(countyId) : null;
+
+      const data = await ParcelService.getParcelsInExtent(bounds, county);
       parcelLayer.clearLayers();
 
-      if (data.features) {
+      if (data.features && data.features.length > 0) {
+        console.log(`[Map] Loaded ${data.features.length} parcels`);
         data.features.forEach(feature => {
-          const geojson = geojsonFromArcgis(feature.geometry);
-          if (geojson) {
+          const gj = geojsonFromArcgis(feature.geometry);
+          if (gj) {
             parcelLayer.addData({
               type: 'Feature',
-              geometry: geojson,
-              properties: feature.attributes || {}
+              geometry: gj,
+              properties: feature.attributes || {},
             });
           }
         });
+        lastLoadedBounds = bounds.pad(0.1);
+      } else {
+        console.log('[Map] No parcels in this extent');
       }
     } catch (err) {
-      console.error('Error loading parcels:', err);
+      console.error('[Map] Error loading parcels:', err);
     } finally {
+      isLoading = false;
       showLoading(false);
     }
   }
 
-  /**
-   * Switch basemap
-   */
   function setBasemap(name) {
     if (!basemapLayers[name]) return;
     Object.values(basemapLayers).forEach(layer => map.removeLayer(layer));
@@ -291,71 +332,45 @@ const MapModule = (() => {
     activeBasemap = name;
   }
 
-  /**
-   * Toggle a layer on/off
-   */
   function toggleLayer(name, enabled) {
     layerStates[name] = enabled;
     if (name === 'parcels') {
-      if (enabled && map.getZoom() >= 15) {
+      if (enabled && map.getZoom() >= 16) {
         loadVisibleParcels();
       } else {
         parcelLayer.clearLayers();
       }
     }
-    // Overlay layers would be added here when data sources are configured
   }
 
-  /**
-   * Fly to a specific location
-   */
   function flyTo(lat, lng, zoom = 17) {
     map.flyTo([lat, lng], zoom, { duration: 1.0 });
   }
 
-  /**
-   * Fly to a county's default view
-   */
   function flyToCounty(countyId) {
     if (countyId === 'all') {
       map.flyToBounds(NWA_REGION.bounds, { duration: 1.0, padding: [20, 20] });
       return;
     }
     const county = CountyRegistry.get(countyId);
-    if (county) {
-      if (county.bounds) {
-        map.flyToBounds(county.bounds, { duration: 1.0, padding: [20, 20] });
-      } else {
-        map.flyTo(county.center, county.zoom || 11, { duration: 1.0 });
-      }
+    if (county && county.bounds) {
+      map.flyToBounds(county.bounds, { duration: 1.0, padding: [20, 20] });
+    } else if (county) {
+      map.flyTo(county.center, county.zoom || 11, { duration: 1.0 });
     }
   }
 
-  /**
-   * Show/hide loading indicator
-   */
   function showLoading(show) {
     const el = document.getElementById('map-loading');
     if (el) el.classList.toggle('hidden', !show);
   }
 
-  /**
-   * Register callback for parcel selection
-   */
   function onSelect(callback) {
     onParcelSelect = callback;
   }
 
-  /**
-   * Get the Leaflet map instance
-   */
-  function getMap() {
-    return map;
-  }
+  function getMap() { return map; }
 
-  /**
-   * Locate user via browser geolocation
-   */
   function locateUser() {
     map.locate({ setView: true, maxZoom: 16 });
   }

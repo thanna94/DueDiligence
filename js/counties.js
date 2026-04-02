@@ -22,15 +22,10 @@ const COUNTY_CONFIGS = {
     zoom: 11,
     color: COUNTY_COLORS[0],
     bounds: [[35.95, -94.62], [36.50, -93.87]],
-    assessorUrl: 'https://www.bentoncountyar.gov/county-assessor',
-    gisServices: {
-      parcels: 'https://services1.arcgis.com/USodXIDgMaj0VC4u/arcgis/rest/services',
-      parcelLayerName: 'Benton_County_Parcels',
-    },
-    parcelIdField: 'PARCEL_ID',
-    ownerField: 'OWNER',
-    addressField: 'SITUS_ADDR',
-    acresField: 'ACRES',
+    assessorUrl: 'https://www.arcountydata.com/propsearch.asp?county=Benton',
+    assessorPropertyUrl: 'https://www.arcountydata.com/parcel.asp?Ession=',
+    gisViewerUrl: 'https://gis.bentoncountyar.gov/parcels/index.html',
+    propertyInfoUrl: 'https://gis.bentoncountyar.gov/propertyinformation/index.php',
   },
   washington: {
     id: 'washington',
@@ -43,15 +38,9 @@ const COUNTY_CONFIGS = {
     zoom: 11,
     color: COUNTY_COLORS[1],
     bounds: [[35.72, -94.49], [36.14, -93.93]],
-    assessorUrl: 'https://www.co.washington.ar.us/assessor',
-    gisServices: {
-      parcels: 'https://services1.arcgis.com/USodXIDgMaj0VC4u/arcgis/rest/services',
-      parcelLayerName: 'Washington_County_Parcels',
-    },
-    parcelIdField: 'PARCEL_ID',
-    ownerField: 'OWNER',
-    addressField: 'SITUS_ADDR',
-    acresField: 'ACRES',
+    assessorUrl: 'https://www.arcountydata.com/propsearch.asp?county=Washington',
+    assessorPropertyUrl: 'https://www.arcountydata.com/parcel.asp?Ession=',
+    gisViewerUrl: 'https://arcserv.co.washington.ar.us/portal/apps/webappviewer/index.html?id=02d08271ae3a4955829f17f1c5a15544',
   },
   crawford: {
     id: 'crawford',
@@ -64,15 +53,9 @@ const COUNTY_CONFIGS = {
     zoom: 11,
     color: COUNTY_COLORS[2],
     bounds: [[35.35, -94.49], [35.77, -93.93]],
-    assessorUrl: 'https://www.crawfordcountyar.com',
-    gisServices: {
-      parcels: 'https://services1.arcgis.com/USodXIDgMaj0VC4u/arcgis/rest/services',
-      parcelLayerName: 'Crawford_County_Parcels',
-    },
-    parcelIdField: 'PARCEL_ID',
-    ownerField: 'OWNER',
-    addressField: 'SITUS_ADDR',
-    acresField: 'ACRES',
+    assessorUrl: 'https://www.arcountydata.com/propsearch.asp?county=Crawford',
+    assessorPropertyUrl: 'https://www.arcountydata.com/parcel.asp?Ession=',
+    gisViewerUrl: 'https://www.arcgis.com/apps/webappviewer/index.html?id=c42df3f49431484db224e11647e3394a',
   },
   sebastian: {
     id: 'sebastian',
@@ -85,15 +68,9 @@ const COUNTY_CONFIGS = {
     zoom: 11,
     color: COUNTY_COLORS[3],
     bounds: [[35.12, -94.50], [35.57, -94.02]],
-    assessorUrl: 'https://www.sebastiancountyar.gov',
-    gisServices: {
-      parcels: 'https://services1.arcgis.com/USodXIDgMaj0VC4u/arcgis/rest/services',
-      parcelLayerName: 'Sebastian_County_Parcels',
-    },
-    parcelIdField: 'PARCEL_ID',
-    ownerField: 'OWNER',
-    addressField: 'SITUS_ADDR',
-    acresField: 'ACRES',
+    assessorUrl: 'https://www.arcountydata.com/propsearch.asp?county=Sebastian',
+    assessorPropertyUrl: 'https://www.arcountydata.com/parcel.asp?Ession=',
+    gisViewerUrl: 'https://www.arcgis.com/apps/webappviewer/index.html?id=32890cc78aee488c972aa4d058523bde',
   }
 };
 
@@ -107,17 +84,35 @@ const NWA_REGION = {
 };
 
 /**
- * Arkansas statewide GIS services used as fallback / primary data source
+ * Arkansas statewide GIS services — REAL verified endpoints
+ *
+ * Planning_Cadastre FeatureServer layers:
+ *   0 = PARCEL_CENTROID_CAMP (points with CAMA attributes)
+ *   6 = PARCEL_POLYGON_CAMP (polygon boundaries with CAMA attributes)
+ *
+ * Fields in these layers (lowercase):
+ *   parcelid, parcellgl, ownername, adrnum, predir, pstrnam, pstrtype,
+ *   psufdir, adrcity, adrzip5, adrlabel, parceltype, assessvalue,
+ *   impvalue, landvalue, totalvalue, subdivision, nbhd, section,
+ *   township, range, str, taxcode, taxarea, camakey, camaprov,
+ *   county, dataprov, camadate, pubdate, countyfips, countyid,
+ *   gis_acres, sourceref, sourcedate
  */
 const ARKANSAS_GIS = {
-  // Arkansas GIS Office - Statewide Parcel Viewer (ArcGIS REST)
-  parcelService: 'https://gis.arkansas.gov/arcgis/rest/services/AGIO_Parcels/FeatureServer/0',
-  // Backup: Arkansas Assessment Coordination Dept
+  // Statewide parcel polygons (boundaries)
+  parcelPolygonService: 'https://gis.arkansas.gov/arcgis/rest/services/FEATURESERVICES/Planning_Cadastre/FeatureServer/6',
+  // Statewide parcel centroids (points — faster for point queries)
+  parcelCentroidService: 'https://gis.arkansas.gov/arcgis/rest/services/FEATURESERVICES/Planning_Cadastre/FeatureServer/0',
+  // MapServer version (for tile/identify operations)
+  parcelMapService: 'https://gis.arkansas.gov/arcgis/rest/services/FEATURESERVICES/Planning_Cadastre/MapServer',
+  // County assessor data portal (for detailed CAMA records)
   assessmentSearch: 'https://www.arcountydata.com',
-  // FEMA flood zones
+  // FEMA National Flood Hazard Layer
   floodService: 'https://hazards.fema.gov/gis/nfhl/rest/services/public/NFHL/MapServer',
-  // Census TIGER boundaries
-  tigerService: 'https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/tigerWMS_Current/MapServer',
+  // Arkansas Utilities layer
+  utilitiesService: 'https://gis.arkansas.gov/arcgis/rest/services/FEATURESERVICES/Utilities/FeatureServer',
+  // Arkansas Boundaries layer
+  boundariesService: 'https://gis.arkansas.gov/arcgis/rest/services/FEATURESERVICES/Boundaries/FeatureServer',
 };
 
 /**
@@ -140,20 +135,23 @@ const CountyRegistry = {
     return this.getAll().find(c => c.fipsCode === fipsCode) || null;
   },
 
+  getByCountyName(name) {
+    if (!name) return null;
+    const upper = name.toUpperCase();
+    return this.getAll().find(c => c.shortName.toUpperCase() === upper) || null;
+  },
+
   register(config) {
     const id = config.id || config.shortName.toLowerCase().replace(/\s+/g, '_');
     const colorIndex = Object.keys(this._counties).length % COUNTY_COLORS.length;
     const county = {
       id,
       color: COUNTY_COLORS[colorIndex],
-      parcelIdField: 'PARCEL_ID',
-      ownerField: 'OWNER',
-      addressField: 'SITUS_ADDR',
-      acresField: 'ACRES',
-      gisServices: { parcels: ARKANSAS_GIS.parcelService },
       ...config,
       name: config.name || `${config.shortName} County`,
       fipsCode: config.fipsCode || (config.stateFips || '05') + (config.countyFips || '000'),
+      assessorUrl: config.assessorUrl || `https://www.arcountydata.com/propsearch.asp?county=${encodeURIComponent(config.shortName)}`,
+      assessorPropertyUrl: config.assessorPropertyUrl || 'https://www.arcountydata.com/parcel.asp?Ession=',
     };
     this._counties[id] = county;
     this._listeners.forEach(fn => fn(county, 'added'));
@@ -162,7 +160,7 @@ const CountyRegistry = {
   },
 
   remove(id) {
-    if (COUNTY_CONFIGS[id]) return false; // Can't remove built-in
+    if (COUNTY_CONFIGS[id]) return false;
     const county = this._counties[id];
     if (county) {
       delete this._counties[id];
