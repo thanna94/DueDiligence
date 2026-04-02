@@ -1,9 +1,12 @@
 /**
  * UI Module
  *
- * Renders property detail panels with data from Arkansas CAMP parcels.
- * Links to county assessor sites for detailed CAMA data (beds, baths, sqft, etc.)
- * that isn't available in the statewide GIS layer.
+ * Renders property detail panels with:
+ * - Arkansas CAMP data (parcel, ownership, valuation)
+ * - FEMA flood zone data
+ * - ATTOM API data when available (beds, baths, sqft, year built, AVM, sales)
+ * - Zillow deep link
+ * - County assessor links
  */
 
 const UIModule = (() => {
@@ -60,23 +63,19 @@ const UIModule = (() => {
     if (closeBtn) closeBtn.addEventListener('click', closeDetail);
   }
 
-  /**
-   * Show property detail panel
-   */
   async function showPropertyDetail(parcel) {
     currentParcel = parcel;
     detailPanel.classList.remove('closed');
     detailPanel.classList.add('open');
     detailPanel.style.transform = '';
 
-    // Header
     document.getElementById('detail-address').textContent =
       parcel.address || parcel.parcelId || 'Unknown Property';
     document.getElementById('detail-subtitle').textContent =
       [parcel.city, parcel.county ? `${parcel.county} County` : '', 'AR', parcel.zip]
         .filter(Boolean).join(', ');
 
-    // Render all tabs with what we have
+    // Render immediately with what we have
     renderOverview(parcel);
     renderZoning(parcel);
     renderOwnership(parcel);
@@ -84,15 +83,16 @@ const UIModule = (() => {
     renderTransactions(parcel);
     renderUtilities(parcel);
 
-    // Activate overview tab
     document.querySelector('.tab-btn[data-tab="overview"]').click();
 
-    // Enrich with flood data
+    // Enrich with flood + ATTOM data
     try {
       const enriched = await ParcelService.getFullPropertyDetail(parcel);
       currentParcel = enriched;
       renderOverview(enriched);
       renderZoning(enriched);
+      renderImprovements(enriched);
+      renderTransactions(enriched);
       renderUtilities(enriched);
     } catch (e) {
       console.warn('[UI] Enrichment failed:', e);
@@ -106,138 +106,173 @@ const UIModule = (() => {
   }
 
   // ---- Formatters ----
-  function fmtCurrency(val) {
+  function $(val) { // fmtCurrency
     if (val === null || val === undefined || isNaN(val)) return 'N/A';
     return '$' + Number(val).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
   }
 
-  function fmtNum(val, dec = 0) {
+  function num(val, dec = 0) {
     if (val === null || val === undefined || isNaN(val)) return 'N/A';
     return Number(val).toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec });
   }
 
-  function display(val) {
+  function d(val) { // display
     if (val === null || val === undefined || val === '' || val === 'Null') return 'N/A';
     return String(val);
   }
 
-  function fmtDate(val) {
+  function fDate(val) {
     if (!val) return 'N/A';
-    // ArcGIS dates come as epoch milliseconds
-    if (typeof val === 'number') {
-      return new Date(val).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
-    }
+    if (typeof val === 'number') return new Date(val).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
     return String(val);
   }
 
   // ---- HTML Builders ----
-  function dataCard(title, rows) {
-    const rowsHtml = rows
-      .filter(([, val]) => val !== undefined)
-      .map(([label, value, badgeClass]) => {
-        const valHtml = badgeClass
-          ? `<span class="badge ${badgeClass}">${value}</span>`
-          : `<span class="data-value">${value}</span>`;
-        return `<div class="data-row"><span class="data-label">${label}</span>${valHtml}</div>`;
+  function card(title, rows) {
+    const html = rows
+      .filter(([, v]) => v !== undefined)
+      .map(([label, value, badge]) => {
+        const vh = badge ? `<span class="badge ${badge}">${value}</span>` : `<span class="data-value">${value}</span>`;
+        return `<div class="data-row"><span class="data-label">${label}</span>${vh}</div>`;
       }).join('');
-    return `<div class="data-card"><div class="data-card-title">${title}</div>${rowsHtml}</div>`;
+    return `<div class="data-card"><div class="data-card-title">${title}</div>${html}</div>`;
   }
 
-  function statRow(stats) {
-    return '<div class="stat-row">' + stats.map(([value, label]) =>
-      `<div class="stat-box"><div class="stat-value">${value}</div><div class="stat-label">${label}</div></div>`
+  function stats(items) {
+    return '<div class="stat-row">' + items.map(([v, l]) =>
+      `<div class="stat-box"><div class="stat-value">${v}</div><div class="stat-label">${l}</div></div>`
     ).join('') + '</div>';
   }
 
-  function linkButton(url, text, icon = '') {
+  function link(url, text) {
     if (!url) return '';
-    return `<a href="${url}" target="_blank" rel="noopener" class="btn btn-secondary btn-sm" style="margin-top:8px;display:inline-flex;align-items:center;gap:4px;text-decoration:none;">${icon}${text}</a>`;
+    return `<a href="${url}" target="_blank" rel="noopener" class="btn btn-secondary btn-sm" style="margin-top:6px;display:inline-flex;align-items:center;gap:4px;text-decoration:none;">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+      ${text}</a>`;
   }
+
+  function hasAttom(p) { return p.attom && p.attom.detail; }
 
   // ---- Tab Renderers ----
 
   function renderOverview(p) {
     const el = document.getElementById('overview-content');
+    const att = p.attom?.detail;
+    const avm = p.attom?.avm;
     const assessorUrl = ParcelService.getAssessorUrl(p);
     const gisUrl = ParcelService.getGisViewerUrl(p);
+    const zillowUrl = ParcelService.getZillowUrl(p);
 
-    const typeLabel = getParcelTypeLabel(p.parcelType);
+    const typeLabel = att?.propertyType || getParcelTypeLabel(p.parcelType);
     const typeBadge = getParcelTypeBadge(p.parcelType);
 
-    // Key stats
-    const stats = [];
-    if (p.acres) stats.push([fmtNum(p.acres, 2), 'Acres']);
-    if (p.totalValue) stats.push([fmtCurrency(p.totalValue), 'Total Value']);
-    if (p.assessedValue) stats.push([fmtCurrency(p.assessedValue), 'Assessed']);
-    if (p.landValue) stats.push([fmtCurrency(p.landValue), 'Land Value']);
-    if (p.improvementValue) stats.push([fmtCurrency(p.improvementValue), 'Improvements']);
-    if (stats.length === 0) {
-      stats.push(['--', 'Acres'], ['--', 'Value'], ['--', 'Assessed']);
+    // Build key stats from best available source
+    const st = [];
+    if (p.acres) st.push([num(p.acres, 2), 'Acres']);
+    if (att?.sqft) st.push([num(att.sqft), 'Sq Ft']);
+    if (att?.yearBuilt) st.push([att.yearBuilt, 'Year Built']);
+    if (att?.bedrooms) st.push([att.bedrooms, 'Beds']);
+    if (att?.bathsTotal || att?.bathsFull) st.push([att.bathsTotal || att.bathsFull, 'Baths']);
+    if (avm?.estimatedValue) st.push([$(avm.estimatedValue), 'AVM Est.']);
+    else if (p.totalValue) st.push([$(p.totalValue), 'Total Value']);
+    if (st.length < 3) {
+      if (!st.find(s => s[1] === 'Acres')) st.push(['--', 'Acres']);
+      if (!st.find(s => s[1] === 'Sq Ft')) st.push(['--', 'Sq Ft']);
+      if (!st.find(s => s[1] === 'Year Built')) st.push(['--', 'Year Built']);
     }
+
+    const attomKeySet = !!localStorage.getItem('attom_api_key');
 
     el.innerHTML = `
       <div style="margin-bottom:8px;">
         <span class="badge ${typeBadge}">${typeLabel}</span>
         ${p.county ? `<span class="badge badge-gray" style="margin-left:4px;">${p.county} County</span>` : ''}
+        ${hasAttom(p) ? '<span class="badge badge-green" style="margin-left:4px;">ATTOM</span>' : ''}
       </div>
-      ${statRow(stats)}
-      ${dataCard('Property Summary', [
-        ['Parcel ID', display(p.parcelId)],
-        ['Address', display(p.address)],
-        ['City', display(p.city)],
-        ['Zip', display(p.zip)],
-        ['Acreage', p.acres ? fmtNum(p.acres, 2) + ' ac' : 'N/A'],
-        ['Parcel Type', display(typeLabel)],
-        ['Subdivision', display(p.subdivision)],
-        ['Neighborhood', display(p.neighborhood)],
+      ${stats(st)}
+      ${hasAttom(p) ? card('Building Details (ATTOM)', [
+        ['Bedrooms', d(att.bedrooms)],
+        ['Full Baths', d(att.bathsFull)],
+        ['Half Baths', d(att.bathsHalf)],
+        ['Living Area', att.sqft ? num(att.sqft) + ' sq ft' : 'N/A'],
+        ['Year Built', d(att.yearBuilt)],
+        ['Stories', d(att.stories)],
+        ['Building Type', d(att.bldgType)],
+        ['Construction', d(att.construction)],
+        ['Roof', d(att.roofType)],
+        ['Heating', d(att.heating)],
+        ['Cooling', d(att.cooling)],
+        ['Garage', d(att.garage)],
+        ['Garage Spaces', d(att.garageSpaces)],
+        ['Pool', d(att.pool)],
+        ['Fireplace Count', d(att.fireplace)],
+      ]) : ''}
+      ${avm ? card('Automated Valuation (ATTOM AVM)', [
+        ['Estimated Value', $(avm.estimatedValue)],
+        ['Low Estimate', $(avm.valueLow)],
+        ['High Estimate', $(avm.valueHigh)],
+        ['Confidence Score', d(avm.confidence)],
+        ['As of Date', d(avm.asOfDate)],
+      ]) : ''}
+      ${card('Parcel Data (Arkansas GIS)', [
+        ['Parcel ID', d(p.parcelId)],
+        ['Address', d(p.address)],
+        ['City', d(p.city)],
+        ['Zip', d(p.zip)],
+        ['Acreage', p.acres ? num(p.acres, 2) + ' ac' : 'N/A'],
+        ['Parcel Type', d(getParcelTypeLabel(p.parcelType))],
+        ['Subdivision', d(p.subdivision)],
+        ['Neighborhood', d(p.neighborhood)],
       ])}
-      ${dataCard('Valuation (from County CAMA)', [
-        ['Total Value', fmtCurrency(p.totalValue)],
-        ['Assessed Value', fmtCurrency(p.assessedValue)],
-        ['Land Value', fmtCurrency(p.landValue)],
-        ['Improvement Value', fmtCurrency(p.improvementValue)],
+      ${card('County Valuation', [
+        ['Total Value', $(p.totalValue)],
+        ['Assessed Value', $(p.assessedValue)],
+        ['Land Value', $(p.landValue)],
+        ['Improvement Value', $(p.improvementValue)],
       ])}
-      <div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px;">
-        ${linkButton(assessorUrl, 'Full Assessor Record', '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>')}
-        ${linkButton(gisUrl, 'County GIS Viewer', '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M3 9h18"/></svg>')}
+      <div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:6px;">
+        ${link(assessorUrl, 'County Assessor')}
+        ${link(gisUrl, 'County GIS Viewer')}
+        ${link(zillowUrl, 'View on Zillow')}
       </div>
-      <p style="font-size:11px;color:var(--text-light);margin-top:12px;">
-        For detailed building info (beds, baths, sq ft, year built), click "Full Assessor Record" above.
-        The statewide GIS layer provides parcel boundaries and valuation; detailed CAMA building data
-        is maintained by each county assessor.
-      </p>
+      ${!attomKeySet ? `<p style="font-size:11px;color:var(--text-light);margin-top:12px;padding:8px;background:#fffbeb;border-radius:6px;border:1px solid #fde68a;">
+        <strong>Tip:</strong> Add an ATTOM API key in the menu (top-left) to get beds, baths, sq ft, year built, AVM estimates, and full sales history for every parcel.
+      </p>` : ''}
     `;
   }
 
   function renderZoning(p) {
     const el = document.getElementById('zoning-content');
-    const floodZone = p.floodZone;
+    const fz = p.floodZone;
+    const att = p.attom?.detail;
 
     el.innerHTML = `
-      ${dataCard('Parcel Classification', [
-        ['Parcel Type', display(getParcelTypeLabel(p.parcelType)), getParcelTypeBadge(p.parcelType)],
-        ['Tax Code', display(p.taxCode)],
-        ['Tax Area', display(p.taxArea)],
-        ['Subdivision', display(p.subdivision)],
-        ['Neighborhood', display(p.neighborhood)],
+      ${card('Parcel Classification', [
+        ['Parcel Type', d(getParcelTypeLabel(p.parcelType)), getParcelTypeBadge(p.parcelType)],
+        ['ATTOM Property Type', att ? d(att.propertyType) : undefined],
+        ['ATTOM Sub-Type', att ? d(att.propertySubType) : undefined],
+        ['Zoning (ATTOM)', att ? d(att.zoning) : undefined],
+        ['Tax Code', d(p.taxCode)],
+        ['Tax Area', d(p.taxArea)],
+        ['Subdivision', d(p.subdivision)],
+        ['Neighborhood', d(p.neighborhood)],
       ])}
-      ${dataCard('FEMA Flood Zone', [
-        ['Flood Zone', display(floodZone?.zone), getFloodBadge(floodZone?.zone)],
-        ['Floodway', display(floodZone?.floodway)],
-        ['FIRM Panel', display(floodZone?.panelNumber)],
-        ['Effective Date', display(floodZone?.effectiveDate)],
-        ['Base Flood Elevation', display(floodZone?.staticBFE)],
+      ${card('FEMA Flood Zone', [
+        ['Flood Zone', d(fz?.zone), getFloodBadge(fz?.zone)],
+        ['Floodway', d(fz?.floodway)],
+        ['FIRM Panel', d(fz?.panelNumber)],
+        ['Effective Date', d(fz?.effectiveDate)],
+        ['Base Flood Elevation', d(fz?.staticBFE)],
       ])}
-      ${floodZone?.description ? `<p style="font-size:12px;color:var(--text-secondary);margin-top:4px;padding:8px 12px;background:var(--bg);border-radius:6px;">${floodZone.description}</p>` : ''}
-      ${dataCard('Section / Township / Range', [
-        ['Section', display(p.section)],
-        ['Township', display(p.township)],
-        ['Range', display(p.range)],
-        ['STR', display(p.str)],
+      ${fz?.description ? `<p style="font-size:12px;color:var(--text-secondary);margin-top:4px;padding:8px 12px;background:var(--bg);border-radius:6px;">${fz.description}</p>` : ''}
+      ${card('Section / Township / Range', [
+        ['Section', d(p.section)],
+        ['Township', d(p.township)],
+        ['Range', d(p.range)],
+        ['STR', d(p.str)],
       ])}
       <p style="font-size:11px;color:var(--text-light);margin-top:12px;">
-        Zoning classifications are maintained by city/county planning departments and may not be
-        reflected in the statewide parcel data. Check with the local planning office for current zoning.
+        Verify current zoning with the local planning department before making development decisions.
       </p>
     `;
   }
@@ -247,127 +282,176 @@ const UIModule = (() => {
     const assessorUrl = ParcelService.getAssessorUrl(p);
 
     el.innerHTML = `
-      ${dataCard('Current Owner', [
-        ['Owner Name', display(p.owner)],
-        ['County', display(p.county)],
+      ${card('Current Owner', [
+        ['Owner Name', d(p.owner)],
+        ['County', d(p.county)],
       ])}
-      ${dataCard('Parcel Identification', [
-        ['Parcel ID', display(p.parcelId)],
-        ['CAMA Key', display(p.camaKey)],
-        ['County ID', display(p.countyId)],
-        ['County FIPS', display(p.countyFips)],
+      ${card('Parcel Identification', [
+        ['Parcel ID', d(p.parcelId)],
+        ['CAMA Key', d(p.camaKey)],
+        ['County ID', d(p.countyId)],
+        ['County FIPS', d(p.countyFips)],
       ])}
-      ${dataCard('Legal Description', [
-        ['Legal', display(p.legalDescription)],
-        ['Subdivision', display(p.subdivision)],
-        ['Section', display(p.section)],
-        ['Township', display(p.township)],
-        ['Range', display(p.range)],
+      ${card('Legal Description', [
+        ['Legal', d(p.attom?.detail?.legalDescription || p.legalDescription)],
+        ['Subdivision', d(p.subdivision)],
+        ['Section', d(p.section)],
+        ['Township', d(p.township)],
+        ['Range', d(p.range)],
       ])}
-      <div style="margin-top:12px;">
-        ${linkButton(assessorUrl, 'View Ownership History on Assessor Site', '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>')}
+      <div style="margin-top:10px;">
+        ${link(assessorUrl, 'Full Ownership & Deed History')}
       </div>
     `;
   }
 
   function renderImprovements(p) {
     const el = document.getElementById('improvements-content');
+    const att = p.attom?.detail;
     const assessorUrl = ParcelService.getAssessorUrl(p);
 
-    el.innerHTML = `
-      ${dataCard('Improvement Summary', [
-        ['Improvement Value', fmtCurrency(p.improvementValue)],
-        ['Land Value', fmtCurrency(p.landValue)],
-        ['Total Value', fmtCurrency(p.totalValue)],
-        ['Acreage', p.acres ? fmtNum(p.acres, 2) + ' ac' : 'N/A'],
-        ['Parcel Type', display(getParcelTypeLabel(p.parcelType))],
-      ])}
-      <div class="data-card" style="background:#eff6ff;border-color:#bfdbfe;">
-        <div class="data-card-title" style="color:#1d4ed8;">Detailed Building Data</div>
-        <p style="font-size:13px;color:#1e40af;line-height:1.5;">
-          Building details including <strong>year built, square footage, bedrooms, bathrooms,
-          construction type, and other improvements</strong> are maintained in each county's
-          CAMA (Computer Assisted Mass Appraisal) system. Click below to view the full
-          property card on the county assessor's website.
-        </p>
-        <div style="margin-top:10px;">
-          ${linkButton(assessorUrl, 'View Full Property Card', '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>')}
+    if (hasAttom(p)) {
+      // Full ATTOM building data
+      const st = [];
+      if (att.sqft) st.push([num(att.sqft), 'Sq Ft']);
+      if (att.yearBuilt) st.push([att.yearBuilt, 'Year Built']);
+      if (att.bedrooms) st.push([att.bedrooms, 'Beds']);
+      if (att.bathsFull) {
+        const bStr = att.bathsHalf ? `${att.bathsFull}F/${att.bathsHalf}H` : String(att.bathsFull);
+        st.push([bStr, 'Baths']);
+      }
+      if (att.stories) st.push([att.stories, 'Stories']);
+
+      el.innerHTML = `
+        ${st.length > 0 ? stats(st) : ''}
+        ${card('Building Details', [
+          ['Building Type', d(att.bldgType)],
+          ['Year Built', d(att.yearBuilt)],
+          ['Living Area', att.sqft ? num(att.sqft) + ' sq ft' : 'N/A'],
+          ['Lot Size', att.lotSizeAcres ? num(att.lotSizeAcres, 2) + ' acres' : (att.lotSizeSqFt ? num(att.lotSizeSqFt) + ' sq ft' : 'N/A')],
+          ['Bedrooms', d(att.bedrooms)],
+          ['Full Baths', d(att.bathsFull)],
+          ['Half Baths', d(att.bathsHalf)],
+          ['Stories', d(att.stories)],
+          ['Construction', d(att.construction)],
+          ['Roof', d(att.roofType)],
+          ['Foundation', 'See assessor record'],
+        ])}
+        ${card('Systems & Features', [
+          ['Heating', d(att.heating)],
+          ['Cooling', d(att.cooling)],
+          ['Garage', d(att.garage)],
+          ['Garage Spaces', d(att.garageSpaces)],
+          ['Pool', d(att.pool)],
+          ['Fireplace(s)', d(att.fireplace)],
+        ])}
+        ${card('Improvement Value', [
+          ['Improvement Value', $(p.improvementValue)],
+          ['Land Value', $(p.landValue)],
+          ['Total', $(p.totalValue)],
+        ])}
+      `;
+    } else {
+      // No ATTOM — show what we have + prompt
+      el.innerHTML = `
+        ${card('Improvement Summary', [
+          ['Improvement Value', $(p.improvementValue)],
+          ['Land Value', $(p.landValue)],
+          ['Total Value', $(p.totalValue)],
+          ['Acreage', p.acres ? num(p.acres, 2) + ' ac' : 'N/A'],
+          ['Parcel Type', d(getParcelTypeLabel(p.parcelType))],
+        ])}
+        <div class="data-card" style="background:#eff6ff;border-color:#bfdbfe;">
+          <div class="data-card-title" style="color:#1d4ed8;">Detailed Building Data</div>
+          <p style="font-size:13px;color:#1e40af;line-height:1.5;">
+            Year built, sq ft, bedrooms, bathrooms, and construction details are available via:
+          </p>
+          <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px;">
+            ${link(assessorUrl, 'County Assessor Record')}
+            ${link(ParcelService.getZillowUrl(p), 'View on Zillow')}
+          </div>
+          ${!localStorage.getItem('attom_api_key') ? `<p style="font-size:11px;color:#1e40af;margin-top:10px;">
+            Or add an <strong>ATTOM API key</strong> in the menu to get this data automatically for every parcel.
+          </p>` : '<p style="font-size:11px;color:#dc2626;margin-top:10px;">ATTOM API key is set but no data was returned for this property. The address may not be in ATTOM\'s database.</p>'}
         </div>
-      </div>
-      ${p.improvementValue && p.improvementValue > 0 ? `
-        <div style="margin-top:8px;">
-          ${statRow([
-            [fmtCurrency(p.improvementValue), 'Improvement Value'],
-            [p.acres ? fmtCurrency(p.totalValue / p.acres) : 'N/A', 'Value / Acre'],
-          ])}
-        </div>
-      ` : ''}
-    `;
+      `;
+    }
   }
 
   function renderTransactions(p) {
     const el = document.getElementById('transactions-content');
+    const sales = p.attom?.salesHistory;
     const assessorUrl = ParcelService.getAssessorUrl(p);
 
-    el.innerHTML = `
-      <div class="data-card" style="background:#eff6ff;border-color:#bfdbfe;">
-        <div class="data-card-title" style="color:#1d4ed8;">Transaction History</div>
-        <p style="font-size:13px;color:#1e40af;line-height:1.5;">
-          Sale history, deed transfers, and transaction details are maintained by the
-          county assessor and clerk. Click below to view the full transaction history.
-        </p>
-        <div style="margin-top:10px;">
-          ${linkButton(assessorUrl, 'View Sales History', '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>')}
+    let salesHtml = '';
+    if (sales && sales.length > 0) {
+      salesHtml = '<div class="transaction-list">' + sales.map(s => `
+        <div class="transaction-item">
+          <div class="tx-date">${d(s.date)}</div>
+          <div class="tx-price">${$(s.price)}</div>
+          <div class="tx-type">${d(s.type)}${s.deedType ? ` · ${s.deedType}` : ''}</div>
+          ${s.buyer ? `<div class="tx-parties">Buyer: ${d(s.buyer)}</div>` : ''}
+          ${s.seller ? `<div class="tx-parties">Seller: ${d(s.seller)}</div>` : ''}
         </div>
-      </div>
-      ${dataCard('Valuation Context', [
-        ['Total Value', fmtCurrency(p.totalValue)],
-        ['Land Value', fmtCurrency(p.landValue)],
-        ['Improvement Value', fmtCurrency(p.improvementValue)],
-        ['Assessed Value', fmtCurrency(p.assessedValue)],
-        ['Acreage', p.acres ? fmtNum(p.acres, 2) + ' ac' : 'N/A'],
-        ['Value Per Acre', p.totalValue && p.acres ? fmtCurrency(p.totalValue / p.acres) + '/ac' : 'N/A'],
+      `).join('') + '</div>';
+    }
+
+    el.innerHTML = `
+      ${salesHtml || `
+        <div class="data-card" style="background:#eff6ff;border-color:#bfdbfe;">
+          <div class="data-card-title" style="color:#1d4ed8;">Transaction History</div>
+          <p style="font-size:13px;color:#1e40af;line-height:1.5;">
+            ${localStorage.getItem('attom_api_key')
+              ? 'No sales history found in ATTOM for this property.'
+              : 'Add an ATTOM API key in the menu to see full sales history, or click below to view on the county assessor site.'}
+          </p>
+          <div style="margin-top:8px;">
+            ${link(assessorUrl, 'View Sales History')}
+          </div>
+        </div>
+      `}
+      ${card('Valuation Context', [
+        ['Total Value', $(p.totalValue)],
+        ['Land Value', $(p.landValue)],
+        ['Improvement Value', $(p.improvementValue)],
+        ['Assessed Value', $(p.assessedValue)],
+        ['Acreage', p.acres ? num(p.acres, 2) + ' ac' : 'N/A'],
+        ['Value Per Acre', p.totalValue && p.acres ? $(p.totalValue / p.acres) + '/ac' : 'N/A'],
       ])}
-      ${dataCard('Data Source', [
-        ['Data Provider', display(p.dataProvider)],
-        ['CAMA Provider', display(p.camaProvider)],
-        ['CAMA Date', fmtDate(p.camaDate)],
-        ['Published', fmtDate(p.pubDate)],
-        ['Source Reference', display(p.sourceRef)],
+      ${card('Data Source', [
+        ['Data Provider', d(p.dataProvider)],
+        ['CAMA Provider', d(p.camaProvider)],
+        ['CAMA Date', fDate(p.camaDate)],
+        ['Published', fDate(p.pubDate)],
       ])}
     `;
   }
 
   function renderUtilities(p) {
     const el = document.getElementById('utilities-content');
-    const floodZone = p.floodZone;
+    const fz = p.floodZone;
 
     el.innerHTML = `
-      ${dataCard('FEMA Flood Zone', [
-        ['Flood Zone', display(floodZone?.zone), getFloodBadge(floodZone?.zone)],
-        ['Floodway', display(floodZone?.floodway)],
-        ['Base Flood Elevation', display(floodZone?.staticBFE)],
+      ${card('FEMA Flood Zone', [
+        ['Flood Zone', d(fz?.zone), getFloodBadge(fz?.zone)],
+        ['Floodway', d(fz?.floodway)],
+        ['Base Flood Elevation', d(fz?.staticBFE)],
       ])}
-      ${floodZone?.description ? `<p style="font-size:12px;color:var(--text-secondary);margin-top:4px;margin-bottom:12px;padding:8px 12px;background:var(--bg);border-radius:6px;">${floodZone.description}</p>` : ''}
-      ${dataCard('Utility Providers (NW Arkansas)', [
+      ${fz?.description ? `<p style="font-size:12px;color:var(--text-secondary);margin-top:4px;margin-bottom:12px;padding:8px 12px;background:var(--bg);border-radius:6px;">${fz.description}</p>` : ''}
+      ${card('Utility Providers (NW Arkansas)', [
         ['Electric', 'SWEPCO, OG&E, Carroll Electric, Ozarks Electric'],
-        ['Natural Gas', 'Arkansas Oklahoma Gas (AOG), CenterPoint Energy, Black Hills Energy'],
-        ['Water', 'Beaver Water District (wholesale), Municipal systems vary by city'],
+        ['Natural Gas', 'AOG, CenterPoint Energy, Black Hills Energy'],
+        ['Water', 'Beaver Water District (wholesale), city systems vary'],
         ['Sewer', 'City municipal sewer or septic — verify with city'],
         ['Internet/Fiber', 'OzarksGo, AT&T Fiber, Cox Communications'],
-        ['Telephone', 'AT&T, Windstream'],
       ])}
-      ${dataCard('Key Contacts for Due Diligence', [
+      ${card('Key Contacts', [
         ['Benton Co. Assessor', '(479) 271-1033'],
         ['Washington Co. Assessor', '(479) 444-1526'],
         ['Crawford Co. Assessor', '(479) 474-1321'],
         ['Sebastian Co. Assessor', '(479) 782-1046'],
-        ['FEMA Map Service', 'msc.fema.gov'],
+        ['FEMA Flood Maps', 'msc.fema.gov'],
       ])}
-      <p style="font-size:11px;color:var(--text-light);margin-top:12px;">
-        Utility availability varies by exact location. Contact the provider or city planning
-        department to confirm service availability before making development decisions.
-      </p>
     `;
   }
 
@@ -376,24 +460,11 @@ const UIModule = (() => {
   function getParcelTypeLabel(code) {
     if (!code) return 'Unknown';
     const map = {
-      'R': 'Residential',
-      'RE': 'Residential',
-      'C': 'Commercial',
-      'CO': 'Commercial',
-      'I': 'Industrial',
-      'IN': 'Industrial',
-      'A': 'Agricultural',
-      'AG': 'Agricultural',
-      'E': 'Exempt',
-      'EX': 'Exempt',
-      'T': 'Timber',
-      'TI': 'Timber',
-      'M': 'Mineral',
-      'MI': 'Mineral',
-      'V': 'Vacant',
-      'VA': 'Vacant',
-      'U': 'Utility',
-      'UT': 'Utility',
+      'R': 'Residential', 'RE': 'Residential', 'C': 'Commercial', 'CO': 'Commercial',
+      'I': 'Industrial', 'IN': 'Industrial', 'A': 'Agricultural', 'AG': 'Agricultural',
+      'E': 'Exempt', 'EX': 'Exempt', 'T': 'Timber', 'TI': 'Timber',
+      'M': 'Mineral', 'MI': 'Mineral', 'V': 'Vacant', 'VA': 'Vacant',
+      'U': 'Utility', 'UT': 'Utility',
     };
     return map[code.toUpperCase()] || code;
   }

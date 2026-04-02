@@ -56,20 +56,25 @@ const MapModule = (() => {
 
     basemapLayers.streets.addTo(map);
 
-    // Add the Arkansas statewide parcel MapServer as a dynamic tile overlay
+    // Try to add Arkansas statewide parcel MapServer as a dynamic tile overlay
     // This renders parcel boundaries server-side (fast, works at all zoom levels)
-    try {
-      const parcelTileLayer = L.esri.dynamicMapLayer({
-        url: ARKANSAS_GIS.parcelMapService,
-        layers: [6], // PARCEL_POLYGON_CAMP
-        opacity: 0.5,
-        minZoom: 14,
-        maxZoom: 20,
-        f: 'image',
-      });
-      parcelTileLayer.addTo(map);
-    } catch (e) {
-      console.warn('[Map] esri.dynamicMapLayer not available, using click-only mode');
+    if (typeof L.esri !== 'undefined' && L.esri.dynamicMapLayer) {
+      try {
+        const parcelTileLayer = L.esri.dynamicMapLayer({
+          url: ARKANSAS_GIS.parcelMapService,
+          layers: [6], // PARCEL_POLYGON_CAMP
+          opacity: 0.5,
+          minZoom: 14,
+          maxZoom: 20,
+          f: 'image',
+        });
+        parcelTileLayer.addTo(map);
+        console.log('[Map] ESRI dynamic parcel layer added');
+      } catch (e) {
+        console.warn('[Map] esri.dynamicMapLayer failed:', e.message);
+      }
+    } else {
+      console.log('[Map] ESRI Leaflet not available, parcels via click/search only');
     }
 
     // County boundary outlines
@@ -161,7 +166,11 @@ const MapModule = (() => {
    * Handle map click
    */
   async function onMapClick(e) {
-    if (map.getZoom() < 12) return; // Too zoomed out
+    if (map.getZoom() < 10) {
+      // Zoom in more for parcel queries
+      map.flyTo(e.latlng, 15, { duration: 0.8 });
+      return;
+    }
 
     const { lat, lng } = e.latlng;
     showLoading(true);

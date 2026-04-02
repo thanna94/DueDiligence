@@ -2,10 +2,10 @@
  * Parcel Data Service
  *
  * Fetches parcel data from Arkansas GIS Office statewide CAMP layers.
- * Primary: Planning_Cadastre FeatureServer (layer 6 = polygons, layer 0 = centroids)
- * Supplemental: FEMA flood data, county assessor links.
+ * Uses JSONP fallback for Safari/iOS CORS compatibility.
+ * Optionally enriches with ATTOM API data (beds, baths, sqft, etc.)
  *
- * Real field names from PARCEL_POLYGON_CAMP / PARCEL_CENTROID_CAMP:
+ * Arkansas CAMP field names:
  *   parcelid, parcellgl, ownername, adrnum, predir, pstrnam, pstrtype,
  *   psufdir, adrcity, adrzip5, adrlabel, parceltype, assessvalue,
  *   impvalue, landvalue, totalvalue, subdivision, nbhd, section,
@@ -20,7 +20,6 @@ const ParcelService = (() => {
   const FEMA_FLOOD_URL = ARKANSAS_GIS.floodService;
   const REQUEST_TIMEOUT = 20000;
 
-  // All useful fields to request
   const ALL_FIELDS = [
     'parcelid', 'parcellgl', 'ownername', 'adrnum', 'predir', 'pstrnam',
     'pstrtype', 'psufdir', 'adrcity', 'adrzip5', 'adrlabel', 'parceltype',
@@ -30,27 +29,47 @@ const ParcelService = (() => {
     'countyfips', 'countyid', 'gis_acres', 'sourceref', 'sourcedate'
   ].join(',');
 
-  // Minimal fields for map display
   const DISPLAY_FIELDS = 'parcelid,ownername,adrlabel,county,countyfips,gis_acres,assessvalue,totalvalue';
 
+  // ---- JSONP support for CORS-restricted servers (Safari/iOS fix) ----
+
+  let jsonpCounter = 0;
+
   /**
-   * Fetch wrapper with timeout
+   * Execute a JSONP request (bypasses CORS entirely)
    */
-  async function fetchWithTimeout(url, opts = {}, timeout = REQUEST_TIMEOUT) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout);
-    try {
-      const resp = await fetch(url, { ...opts, signal: controller.signal });
-      clearTimeout(timer);
-      return resp;
-    } catch (e) {
-      clearTimeout(timer);
-      throw e;
-    }
+  function jsonpRequest(url, timeout = REQUEST_TIMEOUT) {
+    return new Promise((resolve, reject) => {
+      const callbackName = '_arcgis_cb_' + (++jsonpCounter);
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error('JSONP request timed out'));
+      }, timeout);
+
+      function cleanup() {
+        clearTimeout(timer);
+        delete window[callbackName];
+        if (script.parentNode) script.parentNode.removeChild(script);
+      }
+
+      window[callbackName] = (data) => {
+        cleanup();
+        resolve(data);
+      };
+
+      const separator = url.includes('?') ? '&' : '?';
+      const script = document.createElement('script');
+      script.src = `${url}${separator}callback=${callbackName}`;
+      script.onerror = () => {
+        cleanup();
+        reject(new Error('JSONP script load failed'));
+      };
+      document.head.appendChild(script);
+    });
   }
 
   /**
-   * Query ArcGIS Feature Service
+   * Query ArcGIS with fetch first, JSONP fallback for CORS issues
    */
   async function queryArcGIS(serviceUrl, params) {
     const defaults = {
@@ -67,42 +86,69 @@ const ParcelService = (() => {
     const url = `${serviceUrl}/query?${qs}`;
 
     console.log('[ParcelService] Query:', url);
-    const resp = await fetchWithTimeout(url);
-    if (!resp.ok) throw new Error(`ArcGIS request failed: ${resp.status}`);
-    const data = await resp.json();
-    if (data.error) {
-      console.error('[ParcelService] ArcGIS error:', data.error);
-      throw new Error(data.error.message || JSON.stringify(data.error));
+
+    // Try fetch first
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+      const resp = await fetch(url, { signal: controller.signal });
+      clearTimeout(timer);
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.error) throw new Error(data.error.message || 'ArcGIS error');
+        return data;
+      }
+      throw new Error(`HTTP ${resp.status}`);
+    } catch (fetchErr) {
+      console.warn('[ParcelService] Fetch failed, trying JSONP:', fetchErr.message);
     }
-    return data;
+
+    // Fallback: JSONP (works on Safari even without CORS headers)
+    try {
+      const data = await jsonpRequest(url);
+      if (data.error) throw new Error(data.error.message || 'ArcGIS error');
+      return data;
+    } catch (jsonpErr) {
+      console.error('[ParcelService] JSONP also failed:', jsonpErr.message);
+      throw jsonpErr;
+    }
   }
 
   /**
-   * Build county filter WHERE clause
+   * Fetch JSON with timeout (for non-ArcGIS APIs like FEMA, ATTOM)
    */
+  async function fetchJSON(url, opts = {}, timeout = REQUEST_TIMEOUT) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    try {
+      const resp = await fetch(url, { ...opts, signal: controller.signal });
+      clearTimeout(timer);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      return await resp.json();
+    } catch (e) {
+      clearTimeout(timer);
+      throw e;
+    }
+  }
+
+  // ---- County filter helpers ----
+
   function countyWhere(county) {
     if (!county) return '';
-    // The statewide layer uses lowercase 'county' field with the county name
     return `county = '${county.shortName}'`;
   }
 
-  /**
-   * Combine WHERE clauses with AND
-   */
   function combineWhere(...clauses) {
     return clauses.filter(Boolean).join(' AND ');
   }
 
-  /**
-   * Find parcel at a geographic point (map click)
-   * Uses polygon layer with geometry intersection
-   */
+  // ---- Parcel queries ----
+
   async function getParcelAtPoint(lat, lng, county = null) {
     const geom = JSON.stringify({
       x: lng, y: lat,
       spatialReference: { wkid: 4326 }
     });
-
     const params = {
       geometry: geom,
       geometryType: 'esriGeometryPoint',
@@ -111,13 +157,11 @@ const ParcelService = (() => {
       outFields: ALL_FIELDS,
       returnGeometry: true,
     };
-
-    // If we have a county, add a filter to speed up the query
     const cw = countyWhere(county);
     if (cw) params.where = cw;
 
+    // Try polygon layer first (gets boundary shape)
     try {
-      // Try polygon layer first (gives us the boundary shape)
       const data = await queryArcGIS(POLYGON_URL, params);
       if (data.features && data.features.length > 0) {
         return normalizeParcelData(data.features[0], county);
@@ -126,7 +170,7 @@ const ParcelService = (() => {
       console.warn('[ParcelService] Polygon query failed:', e.message);
     }
 
-    // Fallback: try centroid layer with a buffer
+    // Fallback: centroid layer with buffer
     try {
       const data = await queryArcGIS(CENTROID_URL, {
         ...params,
@@ -143,48 +187,35 @@ const ParcelService = (() => {
     return null;
   }
 
-  /**
-   * Search parcels by address text
-   */
   async function searchByAddress(address, county = null) {
-    // Build WHERE using the adrlabel field which contains the full situs address
     const sanitized = address.toUpperCase().replace(/'/g, "''");
     let where = `UPPER(adrlabel) LIKE '%${sanitized}%'`;
-
     const cw = countyWhere(county);
     if (cw) where = combineWhere(where, cw);
 
     try {
       const data = await queryArcGIS(CENTROID_URL, {
         where,
-        outFields: ALL_FIELDS,
-        returnGeometry: true,
         resultRecordCount: 15,
       });
-      if (data.features) {
+      if (data.features && data.features.length > 0) {
         return data.features.map(f => normalizeParcelData(f, county));
       }
     } catch (e) {
       console.warn('[ParcelService] Address search failed:', e.message);
     }
 
-    // Fallback: try searching by street name parts
+    // Fallback: search by street name parts
     try {
       const parts = sanitized.split(/\s+/).filter(p => p.length > 2);
       if (parts.length > 0) {
         let where2 = parts.map(p => `UPPER(pstrnam) LIKE '%${p}%'`).join(' AND ');
-        // Also try matching the address number
         const numMatch = address.match(/^\d+/);
-        if (numMatch) {
-          where2 = `adrnum = ${numMatch[0]} AND ${where2}`;
-        }
-        const cw2 = countyWhere(county);
-        if (cw2) where2 = combineWhere(where2, cw2);
+        if (numMatch) where2 = `adrnum = ${numMatch[0]} AND ${where2}`;
+        if (cw) where2 = combineWhere(where2, cw);
 
         const data = await queryArcGIS(CENTROID_URL, {
           where: where2,
-          outFields: ALL_FIELDS,
-          returnGeometry: true,
           resultRecordCount: 15,
         });
         if (data.features && data.features.length > 0) {
@@ -198,9 +229,6 @@ const ParcelService = (() => {
     return [];
   }
 
-  /**
-   * Search parcels by parcel ID
-   */
   async function searchByParcelId(parcelId, county = null) {
     const sanitized = parcelId.replace(/'/g, "''");
     let where = `parcelid LIKE '%${sanitized}%'`;
@@ -208,24 +236,14 @@ const ParcelService = (() => {
     if (cw) where = combineWhere(where, cw);
 
     try {
-      const data = await queryArcGIS(CENTROID_URL, {
-        where,
-        outFields: ALL_FIELDS,
-        returnGeometry: true,
-        resultRecordCount: 15,
-      });
-      if (data.features) {
-        return data.features.map(f => normalizeParcelData(f, county));
-      }
+      const data = await queryArcGIS(CENTROID_URL, { where, resultRecordCount: 15 });
+      if (data.features) return data.features.map(f => normalizeParcelData(f, county));
     } catch (e) {
       console.warn('[ParcelService] Parcel ID search failed:', e.message);
     }
     return [];
   }
 
-  /**
-   * Search parcels by owner name
-   */
   async function searchByOwner(ownerName, county = null) {
     const sanitized = ownerName.toUpperCase().replace(/'/g, "''");
     let where = `UPPER(ownername) LIKE '%${sanitized}%'`;
@@ -233,33 +251,20 @@ const ParcelService = (() => {
     if (cw) where = combineWhere(where, cw);
 
     try {
-      const data = await queryArcGIS(CENTROID_URL, {
-        where,
-        outFields: ALL_FIELDS,
-        returnGeometry: true,
-        resultRecordCount: 15,
-      });
-      if (data.features) {
-        return data.features.map(f => normalizeParcelData(f, county));
-      }
+      const data = await queryArcGIS(CENTROID_URL, { where, resultRecordCount: 15 });
+      if (data.features) return data.features.map(f => normalizeParcelData(f, county));
     } catch (e) {
       console.warn('[ParcelService] Owner search failed:', e.message);
     }
     return [];
   }
 
-  /**
-   * Get parcels in a map extent for display
-   */
   async function getParcelsInExtent(bounds, county = null) {
     const geom = JSON.stringify({
-      xmin: bounds.getWest(),
-      ymin: bounds.getSouth(),
-      xmax: bounds.getEast(),
-      ymax: bounds.getNorth(),
+      xmin: bounds.getWest(), ymin: bounds.getSouth(),
+      xmax: bounds.getEast(), ymax: bounds.getNorth(),
       spatialReference: { wkid: 4326 }
     });
-
     const params = {
       geometry: geom,
       geometryType: 'esriGeometryEnvelope',
@@ -268,22 +273,19 @@ const ParcelService = (() => {
       outFields: DISPLAY_FIELDS,
       returnGeometry: true,
     };
-
     const cw = countyWhere(county);
     if (cw) params.where = cw;
 
     try {
-      const data = await queryArcGIS(POLYGON_URL, params);
-      return data;
+      return await queryArcGIS(POLYGON_URL, params);
     } catch (e) {
       console.warn('[ParcelService] Extent query failed:', e.message);
       return { features: [] };
     }
   }
 
-  /**
-   * Get FEMA flood zone at a point
-   */
+  // ---- FEMA Flood Zone ----
+
   async function getFloodZone(lat, lng) {
     try {
       const params = new URLSearchParams({
@@ -294,12 +296,18 @@ const ParcelService = (() => {
         mapExtent: `${lng - 0.01},${lat - 0.01},${lng + 0.01},${lat + 0.01}`,
         imageDisplay: '800,600,96',
         returnGeometry: false,
-        f: 'json'
+        f: 'json',
       });
       const url = `${FEMA_FLOOD_URL}/identify?${params}`;
-      console.log('[ParcelService] Flood query:', url);
-      const resp = await fetchWithTimeout(url, {}, 12000);
-      const data = await resp.json();
+
+      let data;
+      try {
+        data = await fetchJSON(url, {}, 12000);
+      } catch (e) {
+        // JSONP fallback for FEMA too
+        data = await jsonpRequest(url, 12000);
+      }
+
       if (data.results && data.results.length > 0) {
         const a = data.results[0].attributes;
         return {
@@ -311,19 +319,16 @@ const ParcelService = (() => {
           description: getFloodZoneDescription(a.FLD_ZONE),
         };
       }
-      // No results means likely outside any mapped flood zone
       return {
         zone: 'X (Minimal Risk)',
         floodway: 'N/A',
         panelNumber: 'N/A',
-        effectiveDate: 'N/A',
-        staticBFE: 'N/A',
         description: 'Area of minimal flood hazard. Outside the 0.2% annual chance floodplain.',
       };
     } catch (e) {
       console.warn('[ParcelService] Flood zone query failed:', e.message);
     }
-    return { zone: 'Data unavailable', floodway: 'N/A', panelNumber: 'N/A', description: '' };
+    return { zone: 'Data unavailable', description: '' };
   }
 
   function getFloodZoneDescription(zone) {
@@ -333,51 +338,164 @@ const ParcelService = (() => {
     if (z === 'AR') return 'Special Flood Hazard Area — Regulatory floodway area.';
     if (z.startsWith('V')) return 'Coastal high hazard area — 1% annual chance of flooding with wave action.';
     if (z === 'X' || z === 'C') return 'Area of minimal flood hazard. Outside the 0.2% annual chance floodplain.';
-    if (z.includes('SHADED') || z === 'B') return 'Moderate flood hazard area — 0.2% annual chance of flooding (500-year floodplain).';
+    if (z.includes('SHADED') || z === 'B') return 'Moderate flood hazard — 0.2% annual chance (500-year floodplain).';
     return '';
   }
 
+  // ---- ATTOM API Integration ----
+
   /**
-   * Normalize parcel attributes from the Arkansas CAMP schema into a common format
+   * Fetch property details from ATTOM API.
+   * Requires an API key stored in localStorage as 'attom_api_key'.
+   * Returns enriched data: beds, baths, sqft, year built, AVM, sales history, etc.
    */
+  async function getAttomData(parcel) {
+    const apiKey = localStorage.getItem('attom_api_key');
+    if (!apiKey) return null;
+
+    const headers = {
+      'Accept': 'application/json',
+      'apikey': apiKey,
+    };
+
+    const results = {};
+
+    // Build address query for ATTOM
+    const addr1 = parcel.address;
+    const addr2 = [parcel.city, 'AR', parcel.zip].filter(Boolean).join(', ');
+
+    if (!addr1) return null;
+
+    // 1) Property Detail (beds, baths, sqft, year built, lot size, etc.)
+    try {
+      const params = new URLSearchParams({
+        address1: addr1,
+        address2: addr2,
+      });
+      const data = await fetchJSON(
+        `https://api.gateway.attomdata.com/propertyapi/v1.0.0/property/detail?${params}`,
+        { headers },
+        15000
+      );
+      if (data.property && data.property.length > 0) {
+        const prop = data.property[0];
+        results.detail = {
+          bedrooms: prop.building?.rooms?.beds,
+          bathsFull: prop.building?.rooms?.bathsFull,
+          bathsHalf: prop.building?.rooms?.bathsHalf,
+          bathsTotal: prop.building?.rooms?.bathsTotal,
+          sqft: prop.building?.size?.livingSize || prop.building?.size?.bldgSize,
+          yearBuilt: prop.building?.summary?.yearBuilt,
+          stories: prop.building?.summary?.levels,
+          bldgType: prop.building?.summary?.bldgType,
+          construction: prop.building?.construction?.constructionType,
+          roofType: prop.building?.construction?.roofCover,
+          heating: prop.building?.utility?.heatingType,
+          cooling: prop.building?.utility?.coolingType,
+          fireplace: prop.building?.interior?.fplcCount,
+          garage: prop.building?.parking?.garageType,
+          garageSpaces: prop.building?.parking?.prkgSize,
+          pool: prop.building?.summary?.pool,
+          lotSizeSqFt: prop.lot?.lotSize2,
+          lotSizeAcres: prop.lot?.lotSize1,
+          lotDescription: prop.lot?.poolType,
+          zoning: prop.lot?.siteZoningIdent,
+          propertyType: prop.summary?.propType,
+          propertySubType: prop.summary?.propSubType,
+          propertyClass: prop.summary?.propClass,
+          legalDescription: prop.summary?.legal1,
+        };
+      }
+    } catch (e) {
+      console.warn('[ATTOM] Property detail failed:', e.message);
+    }
+
+    // 2) AVM (Automated Valuation Model)
+    try {
+      const params = new URLSearchParams({
+        address1: addr1,
+        address2: addr2,
+      });
+      const data = await fetchJSON(
+        `https://api.gateway.attomdata.com/propertyapi/v1.0.0/attomavm/detail?${params}`,
+        { headers },
+        15000
+      );
+      if (data.property && data.property.length > 0) {
+        const avm = data.property[0].avm;
+        results.avm = {
+          estimatedValue: avm?.amount?.value,
+          valueLow: avm?.amount?.low,
+          valueHigh: avm?.amount?.high,
+          confidence: avm?.amount?.scr,
+          asOfDate: avm?.eventDate,
+        };
+      }
+    } catch (e) {
+      console.warn('[ATTOM] AVM failed:', e.message);
+    }
+
+    // 3) Sales History
+    try {
+      const params = new URLSearchParams({
+        address1: addr1,
+        address2: addr2,
+      });
+      const data = await fetchJSON(
+        `https://api.gateway.attomdata.com/propertyapi/v1.0.0/saleshistory/detail?${params}`,
+        { headers },
+        15000
+      );
+      if (data.property && data.property.length > 0) {
+        const sales = data.property[0].saleHistory || [];
+        results.salesHistory = sales.map(s => ({
+          date: s.amount?.saleRecDate || s.amount?.saleTransDate,
+          price: s.amount?.saleAmt,
+          type: s.amount?.saleTransType,
+          deedType: s.calculation?.deedType,
+          buyer: s.buyer?.buyerName,
+          seller: s.seller?.sellerName,
+        }));
+      }
+    } catch (e) {
+      console.warn('[ATTOM] Sales history failed:', e.message);
+    }
+
+    return Object.keys(results).length > 0 ? results : null;
+  }
+
+  // ---- Zillow Deep Link ----
+
+  function getZillowUrl(parcel) {
+    if (!parcel.address) return null;
+    // Zillow's search URL format
+    const addr = encodeURIComponent(
+      [parcel.address, parcel.city, 'AR', parcel.zip].filter(Boolean).join(', ')
+    );
+    return `https://www.zillow.com/homes/${addr}_rb/`;
+  }
+
+  // ---- Normalize parcel data ----
+
   function normalizeParcelData(feature, county = null) {
     const a = feature.attributes || {};
     const geom = feature.geometry;
 
-    // Helper: get field value (try both cases since ArcGIS can return either)
     const get = (field) => {
       const v = a[field] !== undefined ? a[field] : a[field.toUpperCase()];
       if (v === null || v === undefined || v === '' || v === 'Null') return null;
       return v;
     };
 
-    // Build full situs address from component parts
-    const addrParts = [
-      get('adrnum'),
-      get('predir'),
-      get('pstrnam'),
-      get('pstrtype'),
-      get('psufdir')
-    ].filter(Boolean);
+    const addrParts = [get('adrnum'), get('predir'), get('pstrnam'), get('pstrtype'), get('psufdir')].filter(Boolean);
     const builtAddress = addrParts.length > 1 ? addrParts.join(' ') : null;
 
-    const parcelId = get('parcelid');
-    const address = get('adrlabel') || builtAddress;
-    const city = get('adrcity');
-    const zip = get('adrzip5') ? String(get('adrzip5')) : null;
     const countyName = get('county');
     const countyFips = get('countyfips');
-
-    // Resolve county config
     let resolvedCounty = county;
-    if (!resolvedCounty && countyName) {
-      resolvedCounty = CountyRegistry.getByCountyName(countyName);
-    }
-    if (!resolvedCounty && countyFips) {
-      resolvedCounty = CountyRegistry.getByFips('05' + String(countyFips).padStart(3, '0'));
-    }
+    if (!resolvedCounty && countyName) resolvedCounty = CountyRegistry.getByCountyName(countyName);
+    if (!resolvedCounty && countyFips) resolvedCounty = CountyRegistry.getByFips('05' + String(countyFips).padStart(3, '0'));
 
-    // Calculate centroid from geometry
     let centroid = null;
     if (geom) {
       if (geom.rings && geom.rings.length > 0) {
@@ -390,107 +508,82 @@ const ParcelService = (() => {
       }
     }
 
-    const acres = parseFloat(get('gis_acres')) || null;
-    const assessedValue = parseFloat(get('assessvalue')) || null;
-    const improvementValue = parseFloat(get('impvalue')) || null;
-    const landValue = parseFloat(get('landvalue')) || null;
-    const totalValue = parseFloat(get('totalvalue')) || null;
-
     return {
-      // Identification
-      parcelId,
+      parcelId: get('parcelid'),
       camaKey: get('camakey'),
       countyId: get('countyid'),
-
-      // Location
-      address,
-      city,
-      zip,
+      address: get('adrlabel') || builtAddress,
+      city: get('adrcity'),
+      zip: get('adrzip5') ? String(get('adrzip5')) : null,
       county: countyName,
       countyFips,
       countyConfig: resolvedCounty,
-
-      // Ownership
       owner: get('ownername'),
-
-      // Property characteristics
-      acres,
+      acres: parseFloat(get('gis_acres')) || null,
       parcelType: get('parceltype'),
       subdivision: get('subdivision'),
       neighborhood: get('nbhd'),
-
-      // Legal description
       legalDescription: get('parcellgl'),
       section: get('section'),
       township: get('township'),
       range: get('range'),
       str: get('str'),
-
-      // Valuation
-      assessedValue,
-      improvementValue,
-      landValue,
-      totalValue,
-
-      // Tax
+      assessedValue: parseFloat(get('assessvalue')) || null,
+      improvementValue: parseFloat(get('impvalue')) || null,
+      landValue: parseFloat(get('landvalue')) || null,
+      totalValue: parseFloat(get('totalvalue')) || null,
       taxCode: get('taxcode'),
       taxArea: get('taxarea'),
-
-      // Source metadata
       dataProvider: get('dataprov'),
       camaProvider: get('camaprov'),
       camaDate: get('camadate'),
       pubDate: get('pubdate'),
       sourceRef: get('sourceref'),
       sourceDate: get('sourcedate'),
-
-      // Geometry
       geometry: geom,
       centroid,
-
-      // Raw attributes
       _raw: a,
     };
   }
 
   /**
-   * Enrich parcel data with flood zone info
+   * Get full property detail with flood zone + ATTOM enrichment
    */
   async function getFullPropertyDetail(parcel) {
     const enrichments = {};
 
+    // Run flood zone and ATTOM lookups in parallel
+    const promises = [];
+
     if (parcel.centroid) {
-      try {
-        enrichments.floodZone = await getFloodZone(parcel.centroid.lat, parcel.centroid.lng);
-      } catch (e) {
-        enrichments.floodZone = { zone: 'Unavailable', description: '' };
-      }
+      promises.push(
+        getFloodZone(parcel.centroid.lat, parcel.centroid.lng)
+          .then(fz => { enrichments.floodZone = fz; })
+          .catch(() => { enrichments.floodZone = { zone: 'Unavailable', description: '' }; })
+      );
     }
+
+    promises.push(
+      getAttomData(parcel)
+        .then(data => { if (data) enrichments.attom = data; })
+        .catch(() => {})
+    );
+
+    await Promise.all(promises);
 
     return { ...parcel, ...enrichments };
   }
 
-  /**
-   * Build assessor lookup URL for detailed CAMA data (beds, baths, sqft, etc.)
-   */
   function getAssessorUrl(parcel) {
     const county = parcel.countyConfig;
     if (county && county.assessorPropertyUrl && parcel.parcelId) {
       return county.assessorPropertyUrl + encodeURIComponent(parcel.parcelId);
     }
-    if (county && county.assessorUrl) {
-      return county.assessorUrl;
-    }
-    // Fallback to arcountydata.com search
-    if (parcel.county) {
-      return `https://www.arcountydata.com/propsearch.asp?county=${encodeURIComponent(parcel.county)}`;
-    }
+    if (county && county.assessorUrl) return county.assessorUrl;
+    if (parcel.county) return `https://www.arcountydata.com/propsearch.asp?county=${encodeURIComponent(parcel.county)}`;
     return null;
   }
 
-  /**
-   * Build county GIS viewer URL
-   */
   function getGisViewerUrl(parcel) {
     const county = parcel.countyConfig;
     return county ? county.gisViewerUrl : null;
@@ -503,9 +596,11 @@ const ParcelService = (() => {
     searchByOwner,
     getParcelsInExtent,
     getFloodZone,
+    getAttomData,
     getFullPropertyDetail,
     getAssessorUrl,
     getGisViewerUrl,
+    getZillowUrl,
     normalizeParcelData,
     queryArcGIS,
   };

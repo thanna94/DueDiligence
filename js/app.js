@@ -1,25 +1,23 @@
 /**
- * Main Application Module
+ * Walkingstick Feasibility Assistant
  *
- * Wires together all modules: Map, Search, ParcelService, UI, and Counties.
+ * Main Application Module — wires together Map, Search, ParcelService, UI, and Counties.
+ * Handles ATTOM API key management and error reporting.
  */
 
 (function () {
   'use strict';
 
-  // ---- INITIALIZATION ----
   document.addEventListener('DOMContentLoaded', () => {
-    // Load any custom (user-added) counties from localStorage
+    // Load custom counties
     CountyRegistry.loadCustomCounties();
 
     // Initialize modules
     MapModule.init('map');
     UIModule.init();
-    SearchModule.init({
-      onSelect: handleSearchResult,
-    });
+    SearchModule.init({ onSelect: handleSearchResult });
 
-    // Set up UI event handlers
+    // Wire up UI
     initSidePanel();
     initCountyFilter();
     initCountyList();
@@ -27,46 +25,47 @@
     initLayerToggles();
     initMapControls();
     initAddCountyModal();
+    initAttomKeyPanel();
 
-    // Register parcel select callback
+    // Parcel select callback
     MapModule.onSelect(handleParcelSelected);
 
-    // Watch for new counties
+    // County change listener
     CountyRegistry.onChange(() => {
       refreshCountyFilter();
       refreshCountyList();
     });
+
+    // Show status if ATTOM key is already set
+    updateAttomStatus();
+
+    console.log('[Walkingstick] Initialized. ATTOM key:', localStorage.getItem('attom_api_key') ? 'SET' : 'NOT SET');
   });
 
   // ---- HANDLERS ----
 
-  /**
-   * Handle search result selection
-   */
   async function handleSearchResult(result) {
     if (result.type === 'parcel' && result.data) {
-      // Directly selected a parcel from search
       MapModule.highlightParcel(result.data);
       UIModule.showPropertyDetail(result.data);
     } else if (result.lat && result.lng) {
-      // Geocoded address - fly to location and try to find parcel
       MapModule.flyTo(result.lat, result.lng, 18);
-
-      // Wait a moment for the map to settle, then query parcel
+      // Query for parcel at the geocoded location
       setTimeout(async () => {
-        const county = MapModule.findCountyForPoint(result.lat, result.lng);
-        const parcel = await ParcelService.getParcelAtPoint(result.lat, result.lng, county);
-        if (parcel) {
-          MapModule.highlightParcel(parcel);
-          UIModule.showPropertyDetail(parcel);
+        try {
+          const county = MapModule.findCountyForPoint(result.lat, result.lng);
+          const parcel = await ParcelService.getParcelAtPoint(result.lat, result.lng, county);
+          if (parcel) {
+            MapModule.highlightParcel(parcel);
+            UIModule.showPropertyDetail(parcel);
+          }
+        } catch (e) {
+          console.error('[App] Error querying parcel at geocoded location:', e);
         }
       }, 1200);
     }
   }
 
-  /**
-   * Handle parcel selected from map click
-   */
   function handleParcelSelected(parcel) {
     UIModule.showPropertyDetail(parcel);
   }
@@ -100,34 +99,23 @@
 
   function initCountyFilter() {
     refreshCountyFilter();
-    const select = document.getElementById('county-filter');
-    select.addEventListener('change', () => {
-      MapModule.flyToCounty(select.value);
+    document.getElementById('county-filter').addEventListener('change', (e) => {
+      MapModule.flyToCounty(e.target.value);
     });
   }
 
   function refreshCountyFilter() {
     const select = document.getElementById('county-filter');
     const current = select.value;
-    const options = '<option value="all">All Counties</option>' +
-      CountyRegistry.getAll().map(c =>
-        `<option value="${c.id}">${c.shortName}</option>`
-      ).join('');
-    select.innerHTML = options;
-    if ([...select.options].some(o => o.value === current)) {
-      select.value = current;
-    }
+    select.innerHTML = '<option value="all">All Counties</option>' +
+      CountyRegistry.getAll().map(c => `<option value="${c.id}">${c.shortName}</option>`).join('');
+    if ([...select.options].some(o => o.value === current)) select.value = current;
   }
 
-  // ---- COUNTY LIST (side panel) ----
-
-  function initCountyList() {
-    refreshCountyList();
-  }
+  function initCountyList() { refreshCountyList(); }
 
   function refreshCountyList() {
-    const container = document.getElementById('county-list');
-    container.innerHTML = CountyRegistry.getAll().map(c => `
+    document.getElementById('county-list').innerHTML = CountyRegistry.getAll().map(c => `
       <div class="county-item">
         <span class="county-dot" style="background:${c.color}"></span>
         <span class="county-name">${c.name}</span>
@@ -136,7 +124,7 @@
     `).join('');
   }
 
-  // ---- BASEMAP BUTTONS ----
+  // ---- BASEMAP ----
 
   function initBasemapButtons() {
     document.querySelectorAll('.basemap-btn').forEach(btn => {
@@ -148,7 +136,7 @@
     });
   }
 
-  // ---- LAYER TOGGLES ----
+  // ---- LAYERS ----
 
   function initLayerToggles() {
     const layers = {
@@ -158,14 +146,9 @@
       'layer-utilities': 'utilities',
       'layer-master-plan': 'masterPlan',
     };
-
-    Object.entries(layers).forEach(([elId, layerName]) => {
-      const checkbox = document.getElementById(elId);
-      if (checkbox) {
-        checkbox.addEventListener('change', () => {
-          MapModule.toggleLayer(layerName, checkbox.checked);
-        });
-      }
+    Object.entries(layers).forEach(([elId, name]) => {
+      const cb = document.getElementById(elId);
+      if (cb) cb.addEventListener('change', () => MapModule.toggleLayer(name, cb.checked));
     });
   }
 
@@ -173,16 +156,48 @@
 
   function initMapControls() {
     const locateBtn = document.getElementById('locate-btn');
-    if (locateBtn) {
-      locateBtn.addEventListener('click', () => MapModule.locateUser());
-    }
+    if (locateBtn) locateBtn.addEventListener('click', () => MapModule.locateUser());
 
     const measureBtn = document.getElementById('measure-btn');
-    if (measureBtn) {
-      measureBtn.addEventListener('click', () => {
-        measureBtn.classList.toggle('active');
-        // Measurement tool would be implemented here
+    if (measureBtn) measureBtn.addEventListener('click', () => measureBtn.classList.toggle('active'));
+  }
+
+  // ---- ATTOM API KEY ----
+
+  function initAttomKeyPanel() {
+    const input = document.getElementById('attom-api-key');
+    const saveBtn = document.getElementById('save-attom-key');
+    const status = document.getElementById('attom-key-status');
+
+    // Populate if already set
+    const existing = localStorage.getItem('attom_api_key');
+    if (existing && input) {
+      input.value = existing;
+    }
+
+    if (saveBtn) {
+      saveBtn.addEventListener('click', () => {
+        const key = input.value.trim();
+        if (key) {
+          localStorage.setItem('attom_api_key', key);
+          status.textContent = 'Key saved! Property lookups will now include ATTOM data.';
+          status.style.color = 'var(--success)';
+        } else {
+          localStorage.removeItem('attom_api_key');
+          status.textContent = 'Key removed.';
+          status.style.color = 'var(--text-secondary)';
+        }
+        status.style.display = 'block';
+        setTimeout(() => { status.style.display = 'none'; }, 4000);
+        updateAttomStatus();
       });
+    }
+  }
+
+  function updateAttomStatus() {
+    const saveBtn = document.getElementById('save-attom-key');
+    if (saveBtn && localStorage.getItem('attom_api_key')) {
+      saveBtn.textContent = 'Update Key';
     }
   }
 
@@ -204,7 +219,6 @@
 
     form.addEventListener('submit', (e) => {
       e.preventDefault();
-
       const name = document.getElementById('new-county-name').value.trim();
       const stateFips = document.getElementById('new-county-state').value.trim();
       const countyFips = document.getElementById('new-county-fips').value.trim();
@@ -212,9 +226,7 @@
       const lng = parseFloat(document.getElementById('new-county-center-lng').value);
       const assessorUrl = document.getElementById('new-county-assessor-url').value.trim();
 
-      if (!name || !stateFips || !countyFips || isNaN(lat) || isNaN(lng)) {
-        return;
-      }
+      if (!name || !stateFips || !countyFips || isNaN(lat) || isNaN(lng)) return;
 
       CountyRegistry.register({
         shortName: name,

@@ -1,7 +1,7 @@
 {
-  "name": "NWA Due Diligence",
-  "short_name": "NWA DD",
-  "description": "Property Due Diligence Dashboard for Northwest Arkansas",
+  "name": "Walkingstick Feasibility Assistant",
+  "short_name": "Walkingstick",
+  "description": "Property feasibility and due diligence for Northwest Arkansas",
   "start_url": "/DueDiligence/",
   "display": "standalone",
   "background_color": "#1e293b",

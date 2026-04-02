@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="theme-color" content="#1a1a2e">
-  <title>NWA Due Diligence</title>
+  <title>Walkingstick Feasibility Assistant</title>
 
   <!-- Leaflet CSS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
@@ -29,7 +29,7 @@
           <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
         </svg>
       </button>
-      <h1 class="app-title">NWA Due Diligence</h1>
+      <h1 class="app-title">Walkingstick</h1>
     </div>
     <div class="top-bar-center">
       <div class="search-container">
@@ -93,6 +93,19 @@
           <button class="basemap-btn" data-basemap="satellite">Satellite</button>
           <button class="basemap-btn" data-basemap="topo">Topo</button>
         </div>
+      </section>
+      <section class="panel-section">
+        <h3>API Keys</h3>
+        <div class="form-group" style="margin-bottom:8px;">
+          <label for="attom-api-key">ATTOM Data API Key</label>
+          <input type="password" id="attom-api-key" placeholder="Enter your ATTOM API key" style="font-size:12px;" />
+        </div>
+        <p style="font-size:11px;color:var(--text-light);margin-bottom:4px;">
+          ATTOM provides: beds, baths, sq ft, year built, AVM, sales history.
+          <a href="https://api.gateway.attomdata.com/propertyapi/v1.0.0/apiHome" target="_blank" rel="noopener" style="color:var(--primary);">Get a key</a>
+        </p>
+        <button id="save-attom-key" class="btn btn-primary btn-sm" style="width:100%;">Save Key</button>
+        <div id="attom-key-status" style="font-size:11px;margin-top:4px;color:var(--success);display:none;">Key saved!</div>
       </section>
       <section class="panel-section">
         <h3>Counties</h3>
