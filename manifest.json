@@ -2,7 +2,7 @@
   "name": "NWA Due Diligence",
   "short_name": "NWA DD",
   "description": "Property Due Diligence Dashboard for Northwest Arkansas",
-  "start_url": "/",
+  "start_url": "/DueDiligence/",
   "display": "standalone",
   "background_color": "#1e293b",
   "theme_color": "#1e293b",
