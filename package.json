@@ -1,0 +1,11 @@
+{
+  "name": "nwa-due-diligence",
+  "version": "1.0.0",
+  "description": "Property Due Diligence Dashboard for Northwest Arkansas",
+  "scripts": {
+    "start": "npx serve -s . -l 3000",
+    "dev": "npx serve -s . -l 3000 --cors"
+  },
+  "keywords": ["real-estate", "due-diligence", "arkansas", "gis", "property"],
+  "license": "MIT"
+}

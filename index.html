@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#1a1a2e">
+  <title>NWA Due Diligence</title>
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+
+  <!-- ESRI Leaflet Geocoder CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/esri-leaflet-geocoder@3.1.4/dist/esri-leaflet-geocoder.css" crossorigin="" />
+
+  <!-- App CSS -->
+  <link rel="stylesheet" href="css/styles.css" />
+
+  <!-- Manifest for PWA -->
+  <link rel="manifest" href="manifest.json" />
+</head>
+<body>
+  <!-- Top Bar -->
+  <header id="top-bar">
+    <div class="top-bar-left">
+      <button id="menu-toggle" class="icon-btn" aria-label="Menu">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+      </button>
+      <h1 class="app-title">NWA Due Diligence</h1>
+    </div>
+    <div class="top-bar-center">
+      <div class="search-container">
+        <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <input type="text" id="address-search" placeholder="Search address or parcel ID..." autocomplete="off" />
+        <button id="search-clear" class="icon-btn hidden" aria-label="Clear search">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+        <div id="search-results" class="search-dropdown hidden"></div>
+      </div>
+    </div>
+    <div class="top-bar-right">
+      <div class="county-selector">
+        <label for="county-filter">County:</label>
+        <select id="county-filter">
+          <option value="all">All Counties</option>
+        </select>
+      </div>
+    </div>
+  </header>
+
+  <!-- Side Panel -->
+  <nav id="side-panel" class="closed">
+    <div class="side-panel-header">
+      <h2>Layers & Settings</h2>
+      <button id="side-panel-close" class="icon-btn" aria-label="Close panel">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+    <div class="side-panel-content">
+      <section class="panel-section">
+        <h3>Map Layers</h3>
+        <div class="layer-toggles">
+          <label class="toggle-row">
+            <input type="checkbox" id="layer-parcels" checked /> Parcels
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="layer-zoning" /> Zoning
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="layer-floodplain" /> Floodplain
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="layer-utilities" /> Utilities
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="layer-master-plan" /> Master Plan
+          </label>
+        </div>
+      </section>
+      <section class="panel-section">
+        <h3>Base Map</h3>
+        <div class="basemap-options">
+          <button class="basemap-btn active" data-basemap="streets">Streets</button>
+          <button class="basemap-btn" data-basemap="satellite">Satellite</button>
+          <button class="basemap-btn" data-basemap="topo">Topo</button>
+        </div>
+      </section>
+      <section class="panel-section">
+        <h3>Counties</h3>
+        <div id="county-list" class="county-list"></div>
+        <button id="add-county-btn" class="btn btn-secondary btn-sm">+ Add County</button>
+      </section>
+    </div>
+  </nav>
+
+  <!-- Overlay for side panel on mobile -->
+  <div id="side-panel-overlay" class="hidden"></div>
+
+  <!-- Main Content -->
+  <main id="main-content">
+    <!-- Map Container -->
+    <div id="map-container">
+      <div id="map"></div>
+      <div id="map-controls">
+        <button id="locate-btn" class="map-btn" title="My Location">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>
+          </svg>
+        </button>
+        <button id="measure-btn" class="map-btn" title="Measure">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M2 20L20 2M7 17l2-2M11 13l2-2M15 9l2-2"/>
+          </svg>
+        </button>
+      </div>
+      <!-- Loading Indicator -->
+      <div id="map-loading" class="hidden">
+        <div class="spinner"></div>
+        <span>Loading parcels...</span>
+      </div>
+    </div>
+
+    <!-- Property Detail Panel -->
+    <div id="detail-panel" class="closed">
+      <div class="detail-panel-handle" id="detail-handle">
+        <div class="handle-bar"></div>
+      </div>
+      <div class="detail-panel-header">
+        <div class="detail-title-row">
+          <h2 id="detail-address">Select a Property</h2>
+          <button id="detail-close" class="icon-btn" aria-label="Close details">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <div id="detail-subtitle" class="detail-subtitle"></div>
+      </div>
+      <div class="detail-panel-body" id="detail-body">
+        <!-- Tab Navigation -->
+        <div class="detail-tabs">
+          <button class="tab-btn active" data-tab="overview">Overview</button>
+          <button class="tab-btn" data-tab="zoning">Zoning</button>
+          <button class="tab-btn" data-tab="ownership">Ownership</button>
+          <button class="tab-btn" data-tab="improvements">Improvements</button>
+          <button class="tab-btn" data-tab="transactions">Transactions</button>
+          <button class="tab-btn" data-tab="utilities">Utilities</button>
+        </div>
+
+        <!-- Tab Content -->
+        <div class="tab-content active" id="tab-overview">
+          <div id="overview-content" class="detail-grid">
+            <div class="placeholder-msg">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.4">
+                <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/>
+              </svg>
+              <p>Click a parcel on the map or search an address to view property details</p>
+            </div>
+          </div>
+        </div>
+        <div class="tab-content" id="tab-zoning">
+          <div id="zoning-content" class="detail-grid"></div>
+        </div>
+        <div class="tab-content" id="tab-ownership">
+          <div id="ownership-content" class="detail-grid"></div>
+        </div>
+        <div class="tab-content" id="tab-improvements">
+          <div id="improvements-content" class="detail-grid"></div>
+        </div>
+        <div class="tab-content" id="tab-transactions">
+          <div id="transactions-content" class="detail-grid"></div>
+        </div>
+        <div class="tab-content" id="tab-utilities">
+          <div id="utilities-content" class="detail-grid"></div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Add County Modal -->
+  <div id="add-county-modal" class="modal hidden">
+    <div class="modal-overlay"></div>
+    <div class="modal-content">
+      <h3>Add New County</h3>
+      <form id="add-county-form">
+        <div class="form-group">
+          <label for="new-county-name">County Name</label>
+          <input type="text" id="new-county-name" placeholder="e.g. Madison" required />
+        </div>
+        <div class="form-group">
+          <label for="new-county-state">State FIPS</label>
+          <input type="text" id="new-county-state" value="05" placeholder="05 (Arkansas)" required />
+        </div>
+        <div class="form-group">
+          <label for="new-county-fips">County FIPS Code</label>
+          <input type="text" id="new-county-fips" placeholder="e.g. 087" required />
+        </div>
+        <div class="form-group">
+          <label for="new-county-center-lat">Center Latitude</label>
+          <input type="number" step="any" id="new-county-center-lat" placeholder="36.0" required />
+        </div>
+        <div class="form-group">
+          <label for="new-county-center-lng">Center Longitude</label>
+          <input type="number" step="any" id="new-county-center-lng" placeholder="-93.7" required />
+        </div>
+        <div class="form-group">
+          <label for="new-county-assessor-url">Assessor Website URL (optional)</label>
+          <input type="url" id="new-county-assessor-url" placeholder="https://..." />
+        </div>
+        <div class="form-actions">
+          <button type="button" class="btn btn-secondary" id="cancel-add-county">Cancel</button>
+          <button type="submit" class="btn btn-primary">Add County</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script src="https://unpkg.com/esri-leaflet@3.0.12/dist/esri-leaflet.js" crossorigin=""></script>
+  <script src="https://unpkg.com/esri-leaflet-geocoder@3.1.4/dist/esri-leaflet-geocoder.js" crossorigin=""></script>
+
+  <script src="js/counties.js"></script>
+  <script src="js/parcel-service.js"></script>
+  <script src="js/map.js"></script>
+  <script src="js/search.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
