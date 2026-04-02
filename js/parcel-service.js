@@ -244,7 +244,7 @@ const ParcelService = (() => {
       dbg('Centroid query failed: ' + e.message);
     }
 
-    toast('No parcel found at this location. Try zooming in more.', 'error');
+    toast('No parcel found. All 3 request methods failed — check debug log (triple-tap title).', 'error');
     return null;
   }
 

@@ -166,12 +166,6 @@ const MapModule = (() => {
    * Handle map click
    */
   async function onMapClick(e) {
-    if (map.getZoom() < 10) {
-      // Zoom in more for parcel queries
-      map.flyTo(e.latlng, 15, { duration: 0.8 });
-      return;
-    }
-
     const { lat, lng } = e.latlng;
     showLoading(true);
 
@@ -184,7 +178,7 @@ const MapModule = (() => {
         if (onParcelSelect) onParcelSelect(parcel);
       } else {
         showLoading(false);
-        console.log('[Map] No parcel found at', lat, lng);
+        ParcelService.dbg('No parcel found at ' + lat.toFixed(5) + ', ' + lng.toFixed(5) + ' (zoom: ' + map.getZoom() + ')');
       }
     } catch (err) {
       console.error('[Map] Parcel query error:', err);
