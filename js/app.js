@@ -39,7 +39,26 @@
     // Show status if ATTOM key is already set
     updateAttomStatus();
 
-    console.log('[Walkingstick] Initialized. ATTOM key:', localStorage.getItem('attom_api_key') ? 'SET' : 'NOT SET');
+    // Debug log toggle: triple-tap the title
+    let tapCount = 0;
+    let tapTimer = null;
+    const title = document.querySelector('.app-title');
+    if (title) {
+      title.addEventListener('click', () => {
+        tapCount++;
+        clearTimeout(tapTimer);
+        tapTimer = setTimeout(() => { tapCount = 0; }, 600);
+        if (tapCount >= 3) {
+          tapCount = 0;
+          const log = document.getElementById('debug-log');
+          if (log) log.classList.toggle('hidden');
+        }
+      });
+    }
+
+    // Run connection test on startup
+    console.log('[Walkingstick] Initialized. Testing connection...');
+    ParcelService.testConnection();
   });
 
   // ---- HANDLERS ----
