@@ -206,45 +206,86 @@ const ParcelService = (() => {
 
   async function getParcelAtPoint(lat, lng, county = null) {
     toast('Searching for parcel...', 'info');
-    const geom = JSON.stringify({ x: lng, y: lat, spatialReference: { wkid: 4326 } });
 
-    // Try polygon layer first (gets boundary)
+    // Approach 1: Polygon layer with point geometry (simplest format)
     try {
-      const params = {
-        geometry: geom,
+      dbg('Approach 1: Polygon layer, point geometry at ' + lat.toFixed(5) + ',' + lng.toFixed(5));
+      const data = await queryArcGIS(POLYGON_URL, {
+        geometry: lng + ',' + lat,
         geometryType: 'esriGeometryPoint',
         spatialRel: 'esriSpatialRelIntersects',
         inSR: '4326',
-      };
-      const data = await queryArcGIS(POLYGON_URL, params, 'parcel-at-point-poly');
+      }, 'point-poly-simple');
       if (data.features && data.features.length > 0) {
         toast('Parcel found!', 'success');
         return normalizeParcelData(data.features[0], county);
       }
+      dbg('Approach 1: 0 features returned');
     } catch (e) {
-      dbg('Polygon query failed: ' + e.message);
+      dbg('Approach 1 failed: ' + e.message);
     }
 
-    // Fallback: centroid with buffer
+    // Approach 2: Polygon layer with envelope (small bounding box around click)
     try {
-      const params = {
+      const buf = 0.0005; // ~55m buffer
+      dbg('Approach 2: Polygon layer, envelope geometry');
+      const data = await queryArcGIS(POLYGON_URL, {
+        geometry: `${lng - buf},${lat - buf},${lng + buf},${lat + buf}`,
+        geometryType: 'esriGeometryEnvelope',
+        spatialRel: 'esriSpatialRelIntersects',
+        inSR: '4326',
+      }, 'envelope-poly');
+      if (data.features && data.features.length > 0) {
+        toast('Parcel found!', 'success');
+        return normalizeParcelData(data.features[0], county);
+      }
+      dbg('Approach 2: 0 features returned');
+    } catch (e) {
+      dbg('Approach 2 failed: ' + e.message);
+    }
+
+    // Approach 3: Centroid layer with JSON point geometry + distance buffer
+    try {
+      dbg('Approach 3: Centroid layer, JSON point + 200m buffer');
+      const geom = JSON.stringify({ x: lng, y: lat, spatialReference: { wkid: 4326 } });
+      const data = await queryArcGIS(CENTROID_URL, {
         geometry: geom,
         geometryType: 'esriGeometryPoint',
         spatialRel: 'esriSpatialRelIntersects',
         inSR: '4326',
-        distance: 150,
+        distance: 200,
         units: 'esriSRUnit_Meter',
-      };
-      const data = await queryArcGIS(CENTROID_URL, params, 'parcel-at-point-centroid');
+      }, 'point-centroid-buffer');
       if (data.features && data.features.length > 0) {
         toast('Parcel found (centroid)!', 'success');
         return normalizeParcelData(data.features[0], county);
       }
+      dbg('Approach 3: 0 features returned');
     } catch (e) {
-      dbg('Centroid query failed: ' + e.message);
+      dbg('Approach 3 failed: ' + e.message);
     }
 
-    toast('No parcel found. All 3 request methods failed — check debug log (triple-tap title).', 'error');
+    // Approach 4: Centroid layer with envelope
+    try {
+      const buf = 0.002; // ~220m
+      dbg('Approach 4: Centroid layer, envelope');
+      const data = await queryArcGIS(CENTROID_URL, {
+        geometry: `${lng - buf},${lat - buf},${lng + buf},${lat + buf}`,
+        geometryType: 'esriGeometryEnvelope',
+        spatialRel: 'esriSpatialRelIntersects',
+        inSR: '4326',
+        resultRecordCount: 5,
+      }, 'envelope-centroid');
+      if (data.features && data.features.length > 0) {
+        toast('Parcel found (nearby)!', 'success');
+        return normalizeParcelData(data.features[0], county);
+      }
+      dbg('Approach 4: 0 features returned');
+    } catch (e) {
+      dbg('Approach 4 failed: ' + e.message);
+    }
+
+    toast('No parcel found at this location. Open debug log (triple-tap title) for details.', 'error');
     return null;
   }
 

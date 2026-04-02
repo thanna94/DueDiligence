@@ -958,7 +958,8 @@ html, body {
 /* ---- SMALL MOBILE ---- */
 @media (max-width: 480px) {
   .app-title {
-    display: none;
+    display: block;
+    font-size: 14px;
   }
 
   .county-selector label {
